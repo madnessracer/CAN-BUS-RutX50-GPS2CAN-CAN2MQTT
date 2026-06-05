@@ -1,0 +1,6 @@
+
+PCA9555 Pin belegung
+
+IRQ = IO18
+SDA = IO05
+SCL = IO25

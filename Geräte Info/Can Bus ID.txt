@@ -1,0 +1,5 @@
+Mesage ID´s 
+
+400 : Betriebsstundenzähler haupt ID
+
+420 : OTA UP
