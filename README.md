@@ -177,7 +177,55 @@ Falls OTA genutzt wird, prüfe `platformio.ini` auf `upload_port` und `upload_pr
 - Der PCA9555-INT-Pin ist auf `IO21` als `INPUT_PULLUP` konfiguriert
 - AHT10-Messungen sind nicht blockierend und arbeiten mit `millis()`
 - Das Debug-Menü kann über die serielle Konsole gesteuert werden
+- GPS- und WebTerminal-Funktionen sind vorhanden und werden in `src/main.cpp` gesteuert
+- Der Status der WS2812-LED wird für Fehler-, Warn- und Normalzustände genutzt
 
----
+## Build-, Upload- und OTA-Informationen
 
-Bei Bedarf kann die Dokumentation um zusätzliche Pinbelegungen, CAN-ID-Tabellen oder konkrete Projektanwendungsfälle ergänzt werden.
+### PlatformIO-Build
+
+```bash
+platformio run
+```
+
+### Upload-Umgebungen in `platformio.ini`
+
+- `esp32s3_Serial` – Upload über USB / COM24
+- `esp32s3_OTA` – OTA-Upload über `espota` mit `upload_port = 172.24.115.132`
+- `esp32s3_CAN` – CAN-OTA Upload über `canable_upload.py`
+
+### CAN-OTA Upload
+
+Der CAN-OTA-Upload verwendet das Skript `canable_upload.py` und benötigt die Python-Bibliothek `python-can`.
+
+```bash
+pip install python-can
+platformio run --environment esp32s3_CAN --target upload
+```
+
+Der Upload-Befehl im Skript lautet typischerweise:
+
+```bash
+python canable_upload.py --node-id 13 --bitrate 250000 --timeout 30 .pio/build/${PIOENV}/firmware.bin
+```
+
+### OTA-Konfiguration
+
+- `upload_protocol = espota`
+- `upload_port` ist die IP-Adresse des ESP32-S3 im Netzwerk
+- OTA kann über das Debug-Menü ein- und ausgeschaltet werden (`ota on` / `ota off`)
+
+## Dateistruktur und wichtige Dateien
+
+- `platformio.ini` – Projektkonfiguration, Board-Einstellungen, Build-Flags, Umgebungskonfigurationen
+- `canable_upload.py` – CAN-OTA Uploadskript für `gs_usb` / CANable
+- `src/main.cpp` – Firmware-Start, Hardwareinitialisierung, Debug-Menü und CAN/TWAI-Setup
+- `include/config.h` – Pinbelegung und Hardware-Konstanten
+- `include/AHT10.h` – AHT10-Sensorsteuerung und CAN-Datenversand
+- `include/PCA9555.h` – PCA9555 GPIO-Expander-Ansteuerung
+- `include/DebugMenu.h` – Serielle Menüsteuerung und Befehlsparser
+- `include/ErrorLog.h` – Fehlerlogging auf LittleFS
+- `include/Wlan_Config.h` – WLAN, OTA und Netzwerkanbindung
+- `include/WebTerminal.h` – Webterminal-Ausgabe und Remote-Debugging
+
+> Tipp: Für eine vollständige Dokumentation können CAN-ID-Tabellen, spezifische Pin-Zuordnungen und GPS-NMEA-Felder noch als eigene Abschnitte ergänzt werden.
