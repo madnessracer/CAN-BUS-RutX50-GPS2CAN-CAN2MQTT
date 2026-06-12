@@ -7,6 +7,7 @@
 #include <CAN_SUBs.h>
 #include "Can-Bus IDs.h"
 #include "WebTerminal.h"
+#include "PCA9555.h"
 #include <cstring>
 #include <cstdlib>
 
@@ -278,8 +279,28 @@ inline void handleSerialCanInput()
       shouldForward = false;
     }
   }
+  else if (messageId == FetSteuerID)
+  {
+    if (dlc >= 2)
+    {
+      uint8_t fetNum = data[0];
+      uint8_t fetState = data[1];
+      if (fetNum >= 1 && fetNum <= 8 && (fetState == 0x00 || fetState == 0x01))
+      {
+        if (!PCA9555_SetOutput(fetNum - 1, fetState == 0x01))
+        {
+          errorLogAddOnce("CAN_FET_FAIL", "FET CAN-Steuerung fehlgeschlagen");
+        }
+        shouldForward = false;
+      }
+      else
+      {
+        errorLogAddOnce("CAN_FET_FAIL", "Ungueltige FET CAN-Steuerungsdaten");
+      }
+    }
+  }
 
-  // An den CAN-Bus weiterleiten, wenn es kein OTA-Kommando ist
+  // An den CAN-Bus weiterleiten, wenn es kein OTA- oder FET-Kommando ist
   if (shouldForward)
   {
     CAN_SendEx(true, dlc, messageId,

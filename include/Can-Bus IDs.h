@@ -9,6 +9,7 @@ constexpr uint8_t OtaDevieID = 0x0D;   // 13 in Dezimal, Geräte-ID für OTA-Upd
 constexpr uint16_t MessageBasisID = 0x258; // 600 in Dezimal, Basis-ID für CAN-Nachrichten nur bist betriebsstundenzähler online ist
 
 //constexpr uint16_t MessageBasisID = 0x51E; // 1310 in Dezimal, Basis-ID für CAN-Nachrichten
+constexpr uint16_t FetSteuerID = 0x523; // 1315 in Dezimal, FET-Steuerungs-ID für CAN-Kommunikation
 constexpr uint16_t SteuerID = 0x527; // 1327 in Dezimal, ID für das Senden von IP-Adresse an CAN  
 constexpr uint16_t IP_Send_to_CAN = 0x528; // 1320 in Dezimal, ID für das Senden von IP-Adresse an CAN  
 

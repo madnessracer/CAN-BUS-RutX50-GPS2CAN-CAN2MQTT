@@ -7,6 +7,7 @@
 #include "CAN_SUBs.h"
 #include "ErrorLog.h"
 #include "GPSSerial.h"
+#include "UnixTimeClock.h"
 
 enum AHT10State
 {
@@ -21,7 +22,6 @@ static unsigned long aht10LastReadMillis = 0;
 static AHT10State aht10State = AHT10_IDLE;
 static unsigned long aht10MeasureStartMillis = 0;
 static bool aht10PendingRequest = false;
-static uint32_t aht10LastGpsDateTime = 0;
 
 static bool startAHT10Measurement()
 {
@@ -77,35 +77,33 @@ static inline uint32_t packDateTime(uint16_t year, uint8_t month, uint8_t day, u
   return val;
 }
 
-static inline bool gpsDateTimeFromGps(uint16_t &year, uint8_t &month, uint8_t &day, uint8_t &hour, uint8_t &minute, uint8_t &second)
+static inline bool gpsDateTimeFromLocalUnix(uint32_t unixSeconds, uint16_t &year, uint8_t &month, uint8_t &day, uint8_t &hour, uint8_t &minute, uint8_t &second)
 {
-  if (!gpsSerialData.validGPRMC || gpsSerialData.status[0] != 'A')
-    return false;
-
-  if (strlen(gpsSerialData.date) < 6 || strlen(gpsSerialData.utcTime) < 6)
-    return false;
-
-  const char *date = gpsSerialData.date;
-  const char *time = gpsSerialData.utcTime;
-  if (!isdigit((unsigned char)date[0]) || !isdigit((unsigned char)date[1]) ||
-      !isdigit((unsigned char)date[2]) || !isdigit((unsigned char)date[3]) ||
-      !isdigit((unsigned char)date[4]) || !isdigit((unsigned char)date[5]) ||
-      !isdigit((unsigned char)time[0]) || !isdigit((unsigned char)time[1]) ||
-      !isdigit((unsigned char)time[2]) || !isdigit((unsigned char)time[3]) ||
-      !isdigit((unsigned char)time[4]) || !isdigit((unsigned char)time[5]))
+  if (unixSeconds == 0)
   {
     return false;
   }
 
-  day = (uint8_t)((date[0] - '0') * 10 + (date[1] - '0'));
-  month = (uint8_t)((date[2] - '0') * 10 + (date[3] - '0'));
-  uint8_t yearOffset = (uint8_t)((date[4] - '0') * 10 + (date[5] - '0'));
-  year = 2000 + yearOffset;
+  uint32_t secondsOfDay = unixSeconds % 86400UL;
+  hour = secondsOfDay / 3600UL;
+  minute = (secondsOfDay % 3600UL) / 60UL;
+  second = secondsOfDay % 60UL;
 
-  hour = (uint8_t)((time[0] - '0') * 10 + (time[1] - '0'));
-  minute = (uint8_t)((time[2] - '0') * 10 + (time[3] - '0'));
-  second = (uint8_t)((time[4] - '0') * 10 + (time[5] - '0'));
-
+  int z = (int)(unixSeconds / 86400UL) + 719468;
+  int era = z / 146097;
+  int doe = z - era * 146097;
+  int yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+  int yearValue = yoe + era * 400;
+  int doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+  int mp = (5 * doy + 2) / 153;
+  day = doy - (153 * mp + 2) / 5 + 1;
+  month = mp + 3;
+  if (month > 12)
+  {
+    month -= 12;
+    yearValue += 1;
+  }
+  year = (uint16_t)yearValue;
   return true;
 }
 
@@ -114,22 +112,30 @@ static void sendAHT10ToCan(float temperature, float humidity)
   uint8_t tempByte = (uint8_t)constrain(round(temperature + 50.0f), 0.0f, 255.0f);
   uint8_t humidityByte = (uint8_t)constrain(round(humidity), 0.0f, 100.0f);
 
-  uint16_t year;
-  uint8_t month, day, hour, minute, second;
-  if (gpsDateTimeFromGps(year, month, day, hour, minute, second))
+  if (unixTimeClockIsInitialized())
   {
-    uint32_t dateTime = packDateTime(year, month, day, hour, minute, second);
-    if (dateTime != aht10LastGpsDateTime)
+    uint32_t unixSeconds = unixTimeClockGet();
+    long offsetSeconds = 0;
+    bool dstActive = false;
+    char timezone[64] = "";
+    uint32_t localUnixSeconds = unixTimeClockGetEffectiveLocalUnix(unixSeconds, offsetSeconds, dstActive, timezone, sizeof(timezone));
+
+    if (localUnixSeconds != 0)
     {
-      aht10LastGpsDateTime = dateTime;
-      CAN_SendEx(true, 6, MessageBasisID,
-                 (uint8_t)dateTime,
-                 (uint8_t)(dateTime >> 8),
-                 (uint8_t)(dateTime >> 16),
-                 (uint8_t)(dateTime >> 24),
-                 tempByte,
-                 humidityByte);
-      return;
+      uint16_t year;
+      uint8_t month, day, hour, minute, second;
+      if (gpsDateTimeFromLocalUnix(localUnixSeconds, year, month, day, hour, minute, second))
+      {
+        uint32_t packedDateTime = packDateTime(year, month, day, hour, minute, second);
+        CAN_SendEx(true, 6, MessageBasisID,
+                   (uint8_t)packedDateTime,
+                   (uint8_t)(packedDateTime >> 8),
+                   (uint8_t)(packedDateTime >> 16),
+                   (uint8_t)(packedDateTime >> 24),
+                   tempByte,
+                   humidityByte);
+        return;
+      }
     }
   }
 

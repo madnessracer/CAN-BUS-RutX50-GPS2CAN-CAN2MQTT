@@ -4,6 +4,17 @@
 #include <Arduino.h>
 #include <ArduinoOTA.h>
 #include <WiFi.h>
+#include <time.h>
+#if defined(__has_include)
+#  if __has_include(<timezonedb_lookup.h>)
+#    include <timezonedb_lookup.h>
+#    define DEBUG_MENU_HAS_TIMEZONE_LOOKUP 1
+#  else
+#    define DEBUG_MENU_HAS_TIMEZONE_LOOKUP 0
+#  endif
+#else
+#  define DEBUG_MENU_HAS_TIMEZONE_LOOKUP 0
+#endif
 #include "Wlan_Config.h"
 #include "Ws2812.h"
 #include "ErrorLog.h"
@@ -12,8 +23,129 @@
 #include "GpsState.h"
 #include "WebTerminal.h"
 #include "GPSSerial.h"
+#include "ZoneDetectTask.h"
 #include "UnixTimeClock.h"
 #include "CANPing.h"
+
+static inline bool debugMenuParseGpsUtcSeconds(uint32_t &outUtcSeconds)
+{
+  return unixTimeClockParseGpsUtcDateTime(outUtcSeconds);
+}
+
+static inline void debugMenuFormatUtcOffset(long seconds, char *out, size_t outSize)
+{
+  if (outSize == 0)
+    return;
+
+  int hours = (int)(seconds / 3600);
+  int minutes = (int)(abs(seconds % 3600) / 60);
+  snprintf(out, outSize, "UTC%+03d:%02d", hours, minutes);
+}
+
+static inline void debugMenuFormatLocalTime(const struct tm &tmInfo, char *out, size_t outSize)
+{
+  if (outSize == 0)
+    return;
+  snprintf(out, outSize, "%04d-%02d-%02d %02d:%02d:%02d",
+           tmInfo.tm_year + 1900,
+           tmInfo.tm_mon + 1,
+           tmInfo.tm_mday,
+           tmInfo.tm_hour,
+           tmInfo.tm_min,
+           tmInfo.tm_sec);
+}
+
+static inline bool debugMenuComputeTimezoneOffset(const char *zoneName, time_t utcTime, long &outOffsetSeconds, bool &outDstActive, char *outPosixRule, size_t outPosixRuleSize, struct tm *outLocalTm)
+{
+#if DEBUG_MENU_HAS_TIMEZONE_LOOKUP
+  if (zoneName == nullptr || zoneName[0] == '\0')
+  {
+    return false;
+  }
+
+  const char *posixTz = lookup_posix_timezone_tz(zoneName);
+  if (posixTz == nullptr)
+  {
+    return false;
+  }
+
+  if (outPosixRule && outPosixRuleSize > 0)
+  {
+    strncpy(outPosixRule, posixTz, outPosixRuleSize - 1);
+    outPosixRule[outPosixRuleSize - 1] = '\0';
+  }
+
+  if (!unixTimeClockComputeOffsetFromZone(zoneName, utcTime, outOffsetSeconds, outDstActive))
+  {
+    return false;
+  }
+
+  if (outLocalTm != nullptr)
+  {
+    time_t localEpoch = utcTime;
+    if (outOffsetSeconds >= 0)
+    {
+      localEpoch = (time_t)((uint32_t)utcTime + (uint32_t)outOffsetSeconds);
+    }
+    else
+    {
+      localEpoch = (time_t)((uint32_t)utcTime - (uint32_t)(-outOffsetSeconds));
+    }
+    unixTimeClockUtcBreakdown(localEpoch, *outLocalTm);
+  }
+  return true;
+#else
+  if (outPosixRule && outPosixRuleSize > 0)
+  {
+    outPosixRule[0] = '\0';
+  }
+  (void)zoneName;
+  (void)utcTime;
+  (void)outOffsetSeconds;
+  (void)outDstActive;
+  (void)outLocalTm;
+  return false;
+#endif
+}
+
+static inline uint32_t debugMenuGetEffectiveLocalUnix(uint32_t utcSeconds, long &outOffsetSeconds, bool &outDstActive, char *outTimezone, size_t outTimezoneSize)
+{
+  uint32_t localSeconds = unixTimeClockGetLocal();
+  outOffsetSeconds = unixTimeClockOffsetSeconds();
+  outDstActive = false;
+  if (outTimezone && outTimezoneSize > 0)
+  {
+    char country[64] = "";
+    bool valid = false;
+    bool hasGpsPosition = false;
+    unsigned long lastUpdateMs = 0;
+    float latitude = 0.0f;
+    float longitude = 0.0f;
+    if (zoneDetectGetStatus(outTimezone, outTimezoneSize, country, sizeof(country), valid, hasGpsPosition, lastUpdateMs, latitude, longitude) && valid && outTimezone[0] != '\0')
+    {
+      long computedOffset = 0;
+      bool computedDstActive = false;
+      if (debugMenuComputeTimezoneOffset(outTimezone, (time_t)utcSeconds, computedOffset, computedDstActive, nullptr, 0, nullptr))
+      {
+        outOffsetSeconds = computedOffset;
+        outDstActive = computedDstActive;
+        if (computedOffset >= 0)
+        {
+          localSeconds = utcSeconds + (uint32_t)computedOffset;
+        }
+        else
+        {
+          localSeconds = utcSeconds - (uint32_t)(-computedOffset);
+        }
+      }
+    }
+    else
+    {
+      outTimezone[0] = '\0';
+    }
+  }
+  return localSeconds;
+}
 
 enum DebugMenuState
 {
@@ -203,16 +335,46 @@ inline void processTimeLiveMode()
 
   clearTerminalScreen();
   Serial.print("\n=== Zeit Live Mode ===\n");
+
+  unsigned long uptimeMillis = now;
+  unsigned long uptimeSeconds = uptimeMillis / 1000UL;
+  unsigned long uptimeDays = uptimeSeconds / 86400UL;
+  unsigned long uptimeHours = (uptimeSeconds % 86400UL) / 3600UL;
+  unsigned long uptimeMinutes = (uptimeSeconds % 3600UL) / 60UL;
+  unsigned long uptimeSecondsOnly = uptimeSeconds % 60UL;
+  Serial.printf("System Uptime: %lu Tage %02lu:%02lu:%02lu\n", uptimeDays, uptimeHours, uptimeMinutes, uptimeSecondsOnly);
+
   Serial.print("Zeige aktuelle Zeit. Beliebige Taste zum Beenden.\n");
   Serial.print("========================\n");
   if (unixTimeClockIsInitialized())
   {
     uint32_t unixSeconds = unixTimeClockGet();
+    long offsetSeconds = 0;
+    bool dstActive = false;
+    char timezone[64] = "";
+    uint32_t localUnixSeconds = debugMenuGetEffectiveLocalUnix(unixSeconds, offsetSeconds, dstActive, timezone, sizeof(timezone));
     uint32_t seconds = unixSeconds % 60;
     uint32_t minutes = (unixSeconds / 60) % 60;
     uint32_t hours = (unixSeconds / 3600) % 24;
+    uint32_t localSeconds = localUnixSeconds % 60;
+    uint32_t localMinutes = (localUnixSeconds / 60) % 60;
+    uint32_t localHours = (localUnixSeconds / 3600) % 24;
+    char offsetStr[16] = "";
+    debugMenuFormatUtcOffset(offsetSeconds, offsetStr, sizeof(offsetStr));
     Serial.printf("UTC Zeit: %02lu:%02lu:%02lu\n", hours, minutes, seconds);
+    if (timezone[0] != '\0')
+    {
+      Serial.printf("Timezone : %s\n", timezone);
+    }
+    else
+    {
+      Serial.print("Timezone : nicht verfuegbar\n");
+    }
+    Serial.printf("Sommerzeit: %s\n", dstActive ? "ja" : "nein");
+    Serial.printf("UTC Offset: %s\n", offsetStr);
+    Serial.printf("Local Zeit: %02lu:%02lu:%02lu\n", localHours, localMinutes, localSeconds);  
     Serial.printf("Unix-Sekunden: %lu\n", unixSeconds);
+    Serial.printf("Local Unix : %lu\n", localUnixSeconds);
     Serial.printf("GPS-Sync: %s\n", unixTimeClockHasGpsSynced() ? "ja" : "nein");
   }
   else
@@ -433,7 +595,7 @@ void printDebugHelp()
   Serial.printf("%-34s - %s\n", "reboot", "ESP neu starten");
   Serial.printf("%-34s - %s\n", "status", "Zeige Systemstatus");
   Serial.printf("%-34s - %s\n", "temp", "Zeige ESP-Temperatur");
-  Serial.printf("%-34s - %s\n", "time", "Live-Zeit anzeigen, beliebige Taste zum Beenden");
+  Serial.printf("%-34s - %s\n", "time", "Live- und System-Uptime anzeigen, beliebige Taste zum Beenden");
   Serial.printf("%-34s - %s\n", "aht10 status", "AHT10-Status anzeigen");
   Serial.printf("%-34s - %s\n", "aht10 on | aht10 off", "AHT10 periodisch ein-/ausschalten");
   Serial.printf("%-34s - %s\n", "aht10 now", "AHT10 sofort messen und senden");
@@ -465,11 +627,111 @@ void printDebugHelp()
   Serial.printf("%-34s - %s\n", "canping on|off|status|fast", "CAN-Ping Responder steuern (fast = priorisierter Modus)");
   Serial.print("\n");
 
+  Serial.printf("%-34s - %s\n", "zone", "ZoneDetect Status anzeigen");
   Serial.printf("%-34s - %s\n", "error l | error i | error c", "Fehler-Log anzeigen/info/loeschen");
   Serial.print("\n");
   Serial.printf("%-34s - %s\n", "autoexit X", "Debug nach X Minuten automatisch verlassen");
   Serial.printf("%-34s - %s\n", "autoexit off", "Auto-Exit deaktivieren");
   Serial.print("========================\n");
+}
+
+static void printZoneDetectStatus()
+{
+  char timezone[64] = {0};
+  char country[64] = {0};
+  bool valid = false;
+  bool hasGpsPosition = false;
+  unsigned long lastUpdateMs = 0;
+  float lat = 0.0f;
+  float lon = 0.0f;
+
+  if (zoneDetectGetStatus(timezone, sizeof(timezone), country, sizeof(country), valid, hasGpsPosition, lastUpdateMs, lat, lon))
+  {
+    bool dbLoaded = zoneDetectIsDatabaseLoaded();
+    if (!valid && hasGpsPosition && dbLoaded)
+    {
+      zoneDetectRequestImmediateLookup();
+    }
+    Serial.print("\n=== ZoneDetect Status ===\n");
+    if (valid)
+    {
+      Serial.printf("Timezone: %s\n", timezone[0] != '\0' ? timezone : "-");
+      Serial.printf("Country : %s\n", country[0] != '\0' ? country : "-");
+
+      if (gpsSerialData.utcTime[0] != '\0' && gpsSerialData.date[0] != '\0')
+      {
+        char utcFormatted[16] = "";
+        gpsSerialFormatUtcTime(gpsSerialData.utcTime, utcFormatted, sizeof(utcFormatted));
+        char dateFormatted[16] = "";
+        gpsSerialFormatDate(gpsSerialData.date, dateFormatted, sizeof(dateFormatted));
+        Serial.printf("GPS UTC Date : %s\n", dateFormatted);
+        Serial.printf("GPS UTC Time : %s\n", utcFormatted);
+
+        uint32_t gpsUtcSeconds = 0;
+        if (debugMenuParseGpsUtcSeconds(gpsUtcSeconds))
+        {
+          Serial.printf("UTC Timestamp: %lu\n", (unsigned long)gpsUtcSeconds);
+#if DEBUG_MENU_HAS_TIMEZONE_LOOKUP
+          long offsetSeconds = 0;
+          bool dstActive = false;
+          char posixRule[128] = "";
+          struct tm localTm = {0};
+          if (debugMenuComputeTimezoneOffset(timezone, (time_t)gpsUtcSeconds, offsetSeconds, dstActive, posixRule, sizeof(posixRule), &localTm))
+          {
+            char offsetStr[16] = "";
+            debugMenuFormatUtcOffset(offsetSeconds, offsetStr, sizeof(offsetStr));
+            char localTimeStr[32] = "";
+            debugMenuFormatLocalTime(localTm, localTimeStr, sizeof(localTimeStr));
+            Serial.printf("UTC Offset  : %s\n", offsetStr);
+            Serial.printf("TZ Rule     : %s\n", posixRule[0] != '\0' ? posixRule : "-");
+            Serial.printf("DST active  : %s\n", dstActive ? "ja" : "nein");
+            Serial.printf("Local Time  : %s\n", localTimeStr);
+            unixTimeClockSetWithOffset(gpsUtcSeconds, offsetSeconds);
+            Serial.printf("Local Unix  : %lu\n", (unsigned long)unixTimeClockGetLocal());
+          }
+          else
+          {
+            Serial.print("UTC Offset  : konnte nicht berechnet werden. micro-timezonedb fehlt oder Zone nicht gefunden.\n");
+          }
+#else
+          Serial.print("UTC Offset  : micro-timezonedb nicht installiert.\n");
+#endif
+        }
+        else
+        {
+          Serial.print("UTC Timestamp: konnte nicht aus GPS-Daten ermittelt werden.\n");
+        }
+      }
+      else
+      {
+        Serial.print("GPS UTC Date/Time: nicht verfuegbar\n");
+      }
+
+      Serial.printf("Position: %.6f, %.6f\n", lat, lon);
+      Serial.printf("Letzte Aktualisierung: %lu ms\n", lastUpdateMs);
+    }
+    else if (hasGpsPosition)
+    {
+      if (dbLoaded)
+      {
+        Serial.print("ZoneDetect DB geladen, GPS-Daten vorhanden, warte auf ersten Lookup.\n");
+      }
+      else
+      {
+        Serial.print("ZoneDetect DB nicht geladen oder nicht gefunden. Bitte prüfe /timezone16.bin in LittleFS.\n");
+      }
+      Serial.printf("Position: %.6f, %.6f\n", lat, lon);
+    }
+    else
+    {
+      Serial.print("ZoneDetect ist noch nicht verfügbar oder es wurden keine GPS-Daten gefunden.\n");
+    }
+    Serial.print("===========================\n");
+  }
+  else
+  {
+    Serial.print("ZoneDetect Status konnte nicht abgerufen werden.\n");
+  }
 }
 
 void printOtaStatus()
@@ -507,12 +769,33 @@ void printCurrentTime()
   if (unixTimeClockIsInitialized())
   {
     uint32_t unixSeconds = unixTimeClockGet();
+    long offsetSeconds = 0;
+    bool dstActive = false;
+    char timezone[64] = "";
+    uint32_t localUnixSeconds = debugMenuGetEffectiveLocalUnix(unixSeconds, offsetSeconds, dstActive, timezone, sizeof(timezone));
     uint32_t seconds = unixSeconds % 60;
     uint32_t minutes = (unixSeconds / 60) % 60;
     uint32_t hours = (unixSeconds / 3600) % 24;
     uint32_t days = unixSeconds / 86400;
+    uint32_t localSeconds = localUnixSeconds % 60;
+    uint32_t localMinutes = (localUnixSeconds / 60) % 60;
+    uint32_t localHours = (localUnixSeconds / 3600) % 24;
+    char offsetStr[16] = "";
+    debugMenuFormatUtcOffset(offsetSeconds, offsetStr, sizeof(offsetStr));
     Serial.printf("Unix-Sekunden: %lu\n", unixSeconds);
     Serial.printf("UTC Zeit    : %02lu:%02lu:%02lu\n", hours, minutes, seconds);
+    Serial.printf("Local Zeit  : %02lu:%02lu:%02lu\n", localHours, localMinutes, localSeconds);
+    Serial.printf("UTC Offset  : %s\n", offsetStr);
+    Serial.printf("Sommerzeit  : %s\n", dstActive ? "ja" : "nein");
+    if (timezone[0] != '\0')
+    {
+      Serial.printf("Timezone    : %s\n", timezone);
+    }
+    else
+    {
+      Serial.print("Timezone    : nicht verfuegbar\n");
+    }
+    Serial.printf("Local Unix  : %lu\n", localUnixSeconds);
     Serial.printf("Tage seit Epoch: %lu\n", days);
     Serial.printf("GPS-Sync   : %s\n", unixTimeClockHasGpsSynced() ? "ja" : "nein");
   }
@@ -1377,6 +1660,10 @@ void processDebugMenu()
         Serial.printf("Unbekannter OTA-Befehl: '%s'. Verwende ota, ota on oder ota off.\n", cmd);
       }
     }
+    else if (strcmp(cmd, "zone") == 0)
+    {
+      printZoneDetectStatus();
+    }
     else
     {
       Serial.printf("Unbekannter Befehl: '%s'. Tippe 'help'.\n", cmd);
@@ -1473,6 +1760,7 @@ void processGpsLiveMode()
 
   static size_t gpsLiveLinePos = 0;
   static size_t gpsLiveExitPos = 0;
+  static unsigned long lastZonePrint = 0;
   char line[128] = {0};
   char key[32] = {0};
   if (readSerialLine(Serial, key, sizeof(key), gpsLiveExitPos))
@@ -1485,6 +1773,38 @@ void processGpsLiveMode()
     Serial.print("GPS Live Mode beendet.\n");
     printDebugHelp();
     return;
+  }
+
+  if (millis() - lastZonePrint >= 2000)
+  {
+    lastZonePrint = millis();
+    char timezone[64] = {0};
+    char country[64] = {0};
+    bool valid = false;
+    bool hasGpsPosition = false;
+    unsigned long lastUpdateMs = 0;
+    float lat = 0.0f;
+    float lon = 0.0f;
+
+    if (zoneDetectGetStatus(timezone, sizeof(timezone), country, sizeof(country), valid, hasGpsPosition, lastUpdateMs, lat, lon))
+    {
+      if (valid)
+      {
+        Serial.printf("ZoneDetect: %s / %s (%.6f, %.6f)\n", timezone[0] != '\0' ? timezone : "-", country[0] != '\0' ? country : "-", lat, lon);
+      }
+      else if (hasGpsPosition)
+      {
+        Serial.printf("ZoneDetect: GPS-Fix vorhanden, warte auf ersten Lookup (%.6f, %.6f).\n", lat, lon);
+      }
+      else
+      {
+        Serial.print("ZoneDetect: noch keine Daten oder kein GPS-Fix.\n");
+      }
+    }
+    else
+    {
+      Serial.print("ZoneDetect: Status nicht verfuegbar.\n");
+    }
   }
 }
 

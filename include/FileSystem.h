@@ -267,18 +267,26 @@ static inline void testFileIO(fs::FS &fs, const char *path)
 
 static inline String SSID_Lesen()
 {
-    FS_Open();
-    readFile(LittleFS, "/SSID.txt");
-    FS_Close();
-    return FileBuffer;
+    // Testwert fest im FS-Leseweg eintragen.
+    // Original: SSID aus der Datei "/SSID.txt" lesen.
+    // FS_Open();
+    // readFile(LittleFS, "/SSID.txt");
+    // FS_Close();
+    // return FileBuffer;
+
+    return String("ota");
 }
 
 static inline String PASSWORD_Lesen()
 {
-    FS_Open();
-    readFile(LittleFS, "/PASSWORD.txt");
-    FS_Close();
-    return FileBuffer;
+    // Testwert fest im FS-Leseweg eintragen.
+    // Original: Passwort aus der Datei "/PASSWORD.txt" lesen.
+    // FS_Open();
+    // readFile(LittleFS, "/PASSWORD.txt");
+    // FS_Close();
+    // return FileBuffer;
+
+    return String("x756iklx756ikl");
 }
 
 static inline void SSID_Schreiben(String Wert)

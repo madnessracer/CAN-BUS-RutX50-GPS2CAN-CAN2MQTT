@@ -207,6 +207,7 @@ void setup()
   Wire.setClock(100000);
   pinMode(PCA9555_INT_PIN, INPUT_PULLUP);
   FS_Open();
+  zoneDetectTaskInit();
   if (PCA9555_Init())
   {
     Serial.println("PCA9555 initialisiert");
@@ -350,6 +351,23 @@ void loop()
         {
           gpsSerialParseLine(gpsLineBuf);
           unixTimeClockLoop();
+
+          double latDeg = 0.0;
+          double lonDeg = 0.0;
+          bool validLat = gpsSerialParseNmeaLatLong(gpsSerialData.latitude, latDeg);
+          bool validLon = gpsSerialParseNmeaLatLong(gpsSerialData.longitude, lonDeg);
+          if (gpsSerialData.latitudeDir[0] == 'S') latDeg = -latDeg;
+          if (gpsSerialData.longitudeDir[0] == 'W') lonDeg = -lonDeg;
+
+          bool hasFix = (gpsSerialData.status[0] == 'A') || (gpsSerialData.fixQuality[0] > '0');
+          if (hasFix && validLat && validLon)
+          {
+            zoneDetectUpdateGpsCoordinates(latDeg, lonDeg, true);
+          }
+          else
+          {
+            zoneDetectUpdateGpsCoordinates(0.0, 0.0, false);
+          }
         }
 
         if (debugMenuState == DEBUG_GPS_LIVE)
@@ -451,6 +469,25 @@ void loop()
         else if (rx_frame.data_length_code >= 2 && rx_frame.data[0] == 0x01 && rx_frame.data[1] == 0x03)
         {
           webTerminalSetEnabled(true);
+        }
+      }
+      else if (rx_frame.identifier == FetSteuerID)
+      {
+        if (rx_frame.data_length_code >= 2)
+        {
+          uint8_t fetNum = rx_frame.data[0];
+          uint8_t fetState = rx_frame.data[1];
+          if (fetNum >= 1 && fetNum <= 8 && (fetState == 0x00 || fetState == 0x01))
+          {
+            if (!PCA9555_SetOutput(fetNum - 1, fetState == 0x01))
+            {
+              Serial.printf("FET%d CAN-Steuerung fehlgeschlagen\n", fetNum);
+            }
+          }
+          else
+          {
+            Serial.println("Ungueltige FET CAN-Steuerungsdaten");
+          }
         }
       }
     }

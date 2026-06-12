@@ -257,7 +257,7 @@ static void errorLogAddOnce(const char *key, const char *message)
 
   if (unixTimeClockIsInitialized())
   {
-    errorLogFormatUnixDateTime(unixTimeClockGet(), timestamp, sizeof(timestamp));
+    errorLogFormatUnixDateTime(unixTimeClockGetLocal(), timestamp, sizeof(timestamp));
   }
   else if (gpsSerialData.utcTime[0] != '\0' && gpsSerialData.date[0] != '\0')
   {
