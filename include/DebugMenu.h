@@ -829,7 +829,12 @@ void printDebugStatus()
   }
   Serial.printf("WiFi-Status: %d\n", WiFi.status());
   Serial.printf("Boot-Zaehler: %lu\n", getBootCount());
-  Serial.printf("Firmware-Version: %lu\n", getFirmwareVersion());
+#ifdef FIRMWARE_VERSION
+  Serial.printf("Firmware-Version: %s\n", FIRMWARE_VERSION);
+#else
+  Serial.print("Firmware-Version: unbekannt\n");
+#endif
+  Serial.printf("OTA-Firmware-Zähler: %lu\n", getFirmwareVersion());
   Serial.printf("AHT10 aktiv: %s\n", aht10Enabled ? "ja" : "nein");
   if (!isnan(aht10LastTemperature))
   {
