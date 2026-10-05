@@ -1903,6 +1903,7 @@ void process433LiveMode()
     debugPromptShown = false;
     Serial.print("433MHz Live Mode beendet.\n");
     printDebugHelp();
+    debugPromptShown = true;
     return;
   }
 

@@ -68,7 +68,7 @@ inline void rcSwitchDeviceMapInit()
     return;
   }
 
-  for (uint8_t device = 1; device <= RCSWITCH_MAX_DEVICES; ++device)
+  for (uint16_t device = 1; device <= RCSWITCH_MAX_DEVICES; ++device)
   {
     char key[16];
     snprintf(key, sizeof(key), "%s%u", RCSWITCH_DEVICE_KEY_PREFIX, (unsigned)device);
@@ -131,7 +131,7 @@ inline uint8_t rcSwitchFindDeviceByCode(uint32_t code)
     return 0;
   }
 
-  for (uint8_t device = 1; device <= RCSWITCH_MAX_DEVICES; ++device)
+  for (uint16_t device = 1; device <= RCSWITCH_MAX_DEVICES; ++device)
   {
     if (rcSwitchDeviceCodes[device] == code)
     {
@@ -145,7 +145,7 @@ inline uint8_t rcSwitchFindDeviceByCode(uint32_t code)
 inline void rcSwitchDeviceMapPrint()
 {
   bool any = false;
-  for (uint8_t device = 1; device <= RCSWITCH_MAX_DEVICES; ++device)
+  for (uint16_t device = 1; device <= RCSWITCH_MAX_DEVICES; ++device)
   {
     if (rcSwitchDeviceCodes[device] != 0)
     {
@@ -154,7 +154,7 @@ inline void rcSwitchDeviceMapPrint()
         Serial.println("RCSWITCH: device map:");
         any = true;
       }
-      Serial.printf("  Device %u -> Code %lu\n", device, (unsigned long)rcSwitchDeviceCodes[device]);
+      Serial.printf("  Device %u -> Code %lu\n", (unsigned)device, (unsigned long)rcSwitchDeviceCodes[device]);
     }
   }
 
