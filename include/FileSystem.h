@@ -1,7 +1,13 @@
 #ifndef __FILESYSTEM_H__
 #define __FILESYSTEM_H__
 
+#include <Preferences.h>
+
 #define FORMAT_LITTLEFS_IF_FAILED true
+
+static constexpr char WIFI_NVS_NAMESPACE[] = "wifi";
+static constexpr char WIFI_NVS_SSID_KEY[] = "ssid";
+static constexpr char WIFI_NVS_PASSWORD_KEY[] = "password";
 
 static char FileBuffer[32];
 static String SSID;
@@ -267,35 +273,38 @@ static inline void testFileIO(fs::FS &fs, const char *path)
 
 static inline String SSID_Lesen()
 {
-    // Testwert fest im FS-Leseweg eintragen.
-    // Original: SSID aus der Datei "/SSID.txt" lesen.
-    // FS_Open();
-    // readFile(LittleFS, "/SSID.txt");
-    // FS_Close();
-    // return FileBuffer;
+    Preferences prefs;
+    if (prefs.begin(WIFI_NVS_NAMESPACE, true))
+    {
+        String value = prefs.getString(WIFI_NVS_SSID_KEY, "");
+        prefs.end();
+        return value;
+    }
 
-    return String("ota");
+    return String("");
 }
 
 static inline String PASSWORD_Lesen()
 {
-    // Testwert fest im FS-Leseweg eintragen.
-    // Original: Passwort aus der Datei "/PASSWORD.txt" lesen.
-    // FS_Open();
-    // readFile(LittleFS, "/PASSWORD.txt");
-    // FS_Close();
-    // return FileBuffer;
+    Preferences prefs;
+    if (prefs.begin(WIFI_NVS_NAMESPACE, true))
+    {
+        String value = prefs.getString(WIFI_NVS_PASSWORD_KEY, "");
+        prefs.end();
+        return value;
+    }
 
-    return String("x756iklx756ikl");
+    return String("");
 }
 
 static inline void SSID_Schreiben(String Wert)
 {
-    char arr[33];
-    Wert.toCharArray(arr, sizeof(arr));
-    FS_Open();
-    writeFile(LittleFS, "/SSID.txt", arr);
-    FS_Close();
+    Preferences prefs;
+    if (prefs.begin(WIFI_NVS_NAMESPACE, false))
+    {
+        prefs.putString(WIFI_NVS_SSID_KEY, Wert);
+        prefs.end();
+    }
 
     Serial.println(SSID_Lesen());
     Serial.println();
@@ -303,11 +312,12 @@ static inline void SSID_Schreiben(String Wert)
 
 static inline void PASSWORD_Schreiben(String Wert)
 {
-    char arr[33];
-    Wert.toCharArray(arr, sizeof(arr));
-    FS_Open();
-    writeFile(LittleFS, "/PASSWORD.txt", arr);
-    FS_Close();
+    Preferences prefs;
+    if (prefs.begin(WIFI_NVS_NAMESPACE, false))
+    {
+        prefs.putString(WIFI_NVS_PASSWORD_KEY, Wert);
+        prefs.end();
+    }
 
     Serial.println(PASSWORD_Lesen());
     Serial.println();

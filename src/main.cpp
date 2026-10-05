@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <Preferences.h>
 
 #include <WiFi.h>
 #include <ArduinoOTA.h>
@@ -10,24 +11,34 @@
 #include <Wire.h>
 #include <esp_task_wdt.h> // *** WATCHDOG
 #include "Ws2812.h"
+#include <freertos/FreeRTOS.h>
+#include <freertos/queue.h>
 
 #define WDT_TIMEOUT_SEC 10 // *** WATCHDOG
+
+#include "SerialBridge.h"
+
+SerialBridgeClass SerialBridge;
+#define Serial SerialBridge
 
 #include <FileSystem.h>
 #include "AHT10.h"
 #include <CAN_SUBs.h>
 #include <ErrorLog.h>
 #include <CANSerial.h>
+#include "CANForwardIds.h"
+#include "StatusLed.h"
 #include <Wlan_Config.h>
 #include <CAN_INPUT_OTA.h>
 #include "WebTerminal.h"
 #include "GPSSerial.h"
 #include "UnixTimeClock.h"
 #include "DebugMenu.h"
+#include "433_Empang.h"
 #include "CAN-OTA.h"
 #include "CANPing.h"
 
-HardwareSerial *can_tx_ser = &Serial;
+HardwareSerial *can_tx_ser = &Serial1;
 HardwareSerial *can_rx_ser = &Serial1;
 CanLiveMode canLiveMode = CAN_LIVE_OFF;
 bool canLiveModeWeb = false;
@@ -37,117 +48,23 @@ bool gpsLiveModeWeb = false;
 bool gpsLiveRawModeWeb = false;
 GPSSerialData gpsSerialData;
 
-static const uint32_t canIdsToSerial[] = {
-    0x320,
-    0x334};
-
-static uint8_t statusLedR = 0;
-static uint8_t statusLedG = 0;
-static uint8_t statusLedB = 0;
-static unsigned long statusLedInterval = 0;
-static unsigned long statusLedDuration = 0;
-
-static unsigned long getEffectiveBlinkInterval()
-{
-  unsigned long interval = ws2812GetInterval();
-  return interval > 0 ? interval : 3000;
-}
-
-static unsigned long getEffectiveBlinkDuration()
-{
-  unsigned long duration = ws2812GetDuration();
-  return duration > 0 ? duration : 50;
-}
-
-static void gpsSerialPrintLiveDataToWebTerminal()
-{
-  char utcFormatted[16] = "";
-  gpsSerialFormatUtcTime(gpsSerialData.utcTime, utcFormatted, sizeof(utcFormatted));
-  webTerminalAppendFormat("UTC Time       : %s", gpsSerialValueOrDash(utcFormatted));
-  webTerminalAppendFormat("Status         : %s", gpsSerialValueOrDash(gpsSerialData.status));
-
-  char latFormatted[32] = "";
-  gpsSerialFormatLatLong(gpsSerialData.latitude, gpsSerialData.latitudeDir, latFormatted, sizeof(latFormatted));
-  webTerminalAppendFormat("Latitude       : %s", gpsSerialValueOrDash(latFormatted));
-
-  char lonFormatted[32] = "";
-  gpsSerialFormatLatLong(gpsSerialData.longitude, gpsSerialData.longitudeDir, lonFormatted, sizeof(lonFormatted));
-  webTerminalAppendFormat("Longitude      : %s", gpsSerialValueOrDash(lonFormatted));
-
-  webTerminalAppendFormat("Fix Quality    : %s", gpsSerialValueOrDash(gpsSerialData.fixQuality));
-  webTerminalAppendFormat("Satellites     : %s", gpsSerialValueOrDash(gpsSerialData.satellites));
-  webTerminalAppendFormat("HDOP           : %s", gpsSerialValueOrDash(gpsSerialData.hdop));
-  webTerminalAppendFormat("Altitude       : %s", gpsSerialValueOrDash(gpsSerialData.altitude));
-
-  char speedKmH[16] = "";
-  if (gpsSerialData.speedKnots[0] != '\0')
-  {
-    float knots = atof(gpsSerialData.speedKnots);
-    float kmh = knots * 1.852f;
-    snprintf(speedKmH, sizeof(speedKmH), "%.2f", kmh);
-  }
-  webTerminalAppendFormat("Speed (km/h)   : %s", gpsSerialValueOrDash(speedKmH));
-  webTerminalAppendFormat("Track Angle    : %s", gpsSerialValueOrDash(gpsSerialData.trackAngle));
-
-  char dateFormatted[16] = "";
-  gpsSerialFormatDate(gpsSerialData.date, dateFormatted, sizeof(dateFormatted));
-  webTerminalAppendFormat("Date           : %s", gpsSerialValueOrDash(dateFormatted));
-  webTerminalAppendFormat("Mag Var        : %s %s", gpsSerialValueOrDash(gpsSerialData.magneticVariation), gpsSerialValueOrDash(gpsSerialData.magneticVariationDir));
-  webTerminalAppendFormat("Mode Indicator : %s", gpsSerialValueOrDash(gpsSerialData.modeIndicator));
-}
-
-static void setStatusLedBlink(uint8_t r, uint8_t g, uint8_t b)
-{
-  unsigned long interval = getEffectiveBlinkInterval();
-  unsigned long duration = getEffectiveBlinkDuration();
-
-  if (statusLedR == r && statusLedG == g && statusLedB == b &&
-      statusLedInterval == interval && statusLedDuration == duration &&
-      ws2812GetMode() == WS2812_BLINK)
-  {
-    return;
-  }
-
-  statusLedR = r;
-  statusLedG = g;
-  statusLedB = b;
-  statusLedInterval = interval;
-  statusLedDuration = duration;
-
-  ws2812SetBlinkRGB(r, g, b, interval, duration);
-}
-
-static void updateCanStatusLed()
-{
-  bool hasCanError = errorLogIsActive("CAN_BUS_OFF") ||
-                     errorLogIsActive("CAN_STATUS_FAIL") ||
-                     errorLogIsActive("CAN_ERR_WARN") ||
-                     errorLogIsActive("CAN_TX_FAIL");
-
-  if (hasCanError)
-  {
-    setStatusLedBlink(255, 0, 0);
-    return;
-  }
-
-  if (errorLogHasEntries())
-  {
-    setStatusLedBlink(255, 255, 0);
-    return;
-  }
-
-  setStatusLedBlink(0, 255, 0);
-}
-
 void setup()
 {
 
-  Serial.begin(115200);
+  SerialBridge.begin(115200);
+  canForwardIdsInit();
+  rcSwitchDeviceMapInit();
   Serial1.begin(CAN_BAUD_RATE, SERIAL_8N1, CAN_RX_SER, CAN_TX_SER);
   can_tx_ser = &Serial1;
   can_rx_ser = &Serial1;
   Serial2.begin(GPS_BAUD_RATE, SERIAL_8N1, GPS_RX_SER, GPS_TX_SER);
   gpsSerialResetData();
+
+  rcSwitchReceiver.enableReceive(RC_SWITCH_RX_PIN);
+  if (xTaskCreatePinnedToCore(rcswitchReceiveTask, "RCSwitchRx", 4096, nullptr, 2, NULL, 0) != pdPASS)
+  {
+    Serial.println("RCSwitch: Task-Erstellung fehlgeschlagen.");
+  }
 
   clearTerminalScreen();
   loadDebugAutoExitSetting();
@@ -324,11 +241,11 @@ void loop()
 
   updateAHT10();
 
-  handleSerialCanInput();
+  processCanSerialTxQueue();
 
-  handleDebugActivation();
+  SerialBridge.handleBridge();
 
-  processDebugMenu();
+  debugMenuLoop();
   webTerminalLoop();
 
   static char gpsLineBuf[128];
@@ -380,7 +297,6 @@ void loop()
           {
             if (isGPRMC)
             {
-              clearTerminalScreen();
               gpsSerialPrintLiveData();
             }
           }
@@ -415,79 +331,77 @@ void loop()
     }
   }
 
-  // Empfange CAN-Nachricht mit Timeout
-  if (twai_receive(&rx_frame, pdMS_TO_TICKS(3)) == ESP_OK)
+  // Empfange CAN-Nachrichten mit Timeout
+  while (twai_receive(&rx_frame, pdMS_TO_TICKS(3)) == ESP_OK)
   {
-    if (rx_frame.extd) // Prüfe auf Extended Frame
+    // CAN Live Mode: Zeige auch TWAI-Empfangsdaten (extended und standard).
+    if (canLiveTwaiEnabled())
     {
+      logCanTwaiFrame(rx_frame);
+    }
 
-      // CAN Live Mode: Zeige auch normale TWAI-Empfangsdaten.
-      if (canLiveTwaiEnabled())
+    // CAN-OTA: START-Kommando kann im Normalmodus ankommen → zuerst prüfen
+    CAN_OTA::processMessage(rx_frame);
+    if (CAN_OTA::isUpdateMode())
+    {
+      return; // OTA gestartet, normale Verarbeitung überspringen
+    }
+
+    // CANPing: Ping-Request beantworten
+    CANPing::processMessage(rx_frame.identifier, rx_frame.data, rx_frame.data_length_code);
+
+    CanInputOTA();
+
+    bool forwardToSerial = canForwardIdAllowed(rx_frame.identifier) || rx_frame.identifier == MessageBasisID;
+
+    if (forwardToSerial)
+    {
+      sendCanMessageToCanTxSer(rx_frame);
+    }
+
+    if (rx_frame.identifier == SteuerID)
+    {
+      if (rx_frame.data_length_code >= 2 && rx_frame.data[0] == 0x01 && rx_frame.data[1] == 0x00)
       {
-        logCanTwaiFrame(rx_frame);
+        OTA_Stop();
       }
-
-      // CAN-OTA: START-Kommando kann im Normalmodus ankommen → zuerst prüfen
-      CAN_OTA::processMessage(rx_frame);
-      if (CAN_OTA::isUpdateMode())
-        return; // OTA gestartet, normale Verarbeitung überspringen
-
-      // CANPing: Ping-Request beantworten
-      CANPing::processMessage(rx_frame.identifier, rx_frame.data, rx_frame.data_length_code);
-
-      CanInputOTA();
-
-      bool forwardToSerial = false;
-      for (uint8_t i = 0; i < sizeof(canIdsToSerial) / sizeof(canIdsToSerial[0]); ++i)
+      else if (rx_frame.data_length_code >= 2 && rx_frame.data[0] == 0x01 && rx_frame.data[1] == 0x01)
       {
-        if (rx_frame.identifier == canIdsToSerial[i])
-        {
-          forwardToSerial = true;
-          break;
-        }
+        OTA_Start();
       }
-
-      if (forwardToSerial)
+      else if (rx_frame.data_length_code >= 2 && rx_frame.data[0] == 0x01 && rx_frame.data[1] == 0x02)
       {
-        sendCanMessageToCanTxSer(rx_frame);
+        webTerminalSetEnabled(false);
       }
-
-      if (rx_frame.identifier == SteuerID)
+      else if (rx_frame.data_length_code >= 2 && rx_frame.data[0] == 0x01 && rx_frame.data[1] == 0x03)
       {
-        if (rx_frame.data_length_code >= 2 && rx_frame.data[0] == 0x01 && rx_frame.data[1] == 0x00)
-        {
-          OTA_Stop();
-        }
-        else if (rx_frame.data_length_code >= 2 && rx_frame.data[0] == 0x01 && rx_frame.data[1] == 0x01)
-        {
-          OTA_Start();
-        }
-        else if (rx_frame.data_length_code >= 2 && rx_frame.data[0] == 0x01 && rx_frame.data[1] == 0x02)
-        {
-          webTerminalSetEnabled(false);
-        }
-        else if (rx_frame.data_length_code >= 2 && rx_frame.data[0] == 0x01 && rx_frame.data[1] == 0x03)
-        {
-          webTerminalSetEnabled(true);
-        }
+        webTerminalSetEnabled(true);
       }
-      else if (rx_frame.identifier == FetSteuerID)
+      else if (rx_frame.data_length_code >= 2 && rx_frame.data[0] == 0x01 && rx_frame.data[1] == 0x05)
       {
-        if (rx_frame.data_length_code >= 2)
+        SerialBridge.stopBridge();
+      }
+      else if (rx_frame.data_length_code >= 2 && rx_frame.data[0] == 0x01 && rx_frame.data[1] == 0x06)
+      {
+        SerialBridge.beginBridge();
+      }
+    }
+    else if (rx_frame.identifier == FetSteuerID)
+    {
+      if (rx_frame.data_length_code >= 2)
+      {
+        uint8_t fetNum = rx_frame.data[0];
+        uint8_t fetState = rx_frame.data[1];
+        if (fetNum >= 1 && fetNum <= 8 && (fetState == 0x00 || fetState == 0x01))
         {
-          uint8_t fetNum = rx_frame.data[0];
-          uint8_t fetState = rx_frame.data[1];
-          if (fetNum >= 1 && fetNum <= 8 && (fetState == 0x00 || fetState == 0x01))
+          if (!PCA9555_SetOutput(fetNum - 1, fetState == 0x01))
           {
-            if (!PCA9555_SetOutput(fetNum - 1, fetState == 0x01))
-            {
-              Serial.printf("FET%d CAN-Steuerung fehlgeschlagen\n", fetNum);
-            }
+            Serial.printf("FET%d CAN-Steuerung fehlgeschlagen\n", fetNum);
           }
-          else
-          {
-            Serial.println("Ungueltige FET CAN-Steuerungsdaten");
-          }
+        }
+        else
+        {
+          Serial.println("Ungueltige FET CAN-Steuerungsdaten");
         }
       }
     }

@@ -4,6 +4,7 @@
 #include <cstdarg>
 #include "driver/twai.h"
 #include "ErrorLog.h"
+#include "Can-Bus IDs.h"
 
 // TWAI-Nachrichten-Strukturen
 static twai_message_t rx_frame; // NUR zum Empfangen
@@ -31,7 +32,7 @@ static inline twai_timing_config_t CAN_GetTimingConfig(uint32_t speed)
   }
 }
 
-static uint8_t s_rxQueueLen = 50; // rxQueueLen = 50 (anpassbar)
+static uint8_t s_rxQueueLen = 100; // rxQueueLen = 100 (anpassbar)
 static bool canBusIsOff = false;
 static bool canSendAllowed = true;
 static unsigned long canSendPauseUntil = 0;
@@ -41,6 +42,9 @@ static inline bool CAN_IsBusOff()
 {
   return canBusIsOff;
 }
+
+extern bool canForwardIdAllowed(uint32_t messageId);
+extern void canSerialForwardFrame(const twai_message_t &frame);
 
 static inline bool CAN_CanSend()
 {
@@ -225,6 +229,12 @@ static inline void CAN_Send(uint MesageID, byte MesageByte1 = 0, byte MesageByte
   tx.data[6] = MesageByte7;
   tx.data[7] = MesageByte8;
 
+  bool serialForward = canForwardIdAllowed(tx.identifier) || tx.identifier == IP_Send_to_CAN || tx.identifier == MessageBasisID;
+  if (serialForward)
+  {
+    canSerialForwardFrame(tx);
+  }
+
   if (!CAN_CanSend())
   {
     return;
@@ -241,7 +251,7 @@ static inline void CAN_Send(uint MesageID, byte MesageByte1 = 0, byte MesageByte
   }
 }
 
-static inline void CAN_SendEx(bool frameExtended, uint8_t dlc, uint MesageID, ...)
+inline void CAN_SendEx(bool frameExtended, uint8_t dlc, uint MesageID, ...)
 {
   if (dlc < 1) dlc = 1;
   if (dlc > 8) dlc = 8;
@@ -259,6 +269,12 @@ static inline void CAN_SendEx(bool frameExtended, uint8_t dlc, uint MesageID, ..
   va_end(args);
 
   for (uint8_t i = dlc; i < 8; ++i) tx.data[i] = 0;
+  bool serialForward = canForwardIdAllowed(tx.identifier) || tx.identifier == IP_Send_to_CAN || tx.identifier == MessageBasisID;
+  if (serialForward)
+  {
+    canSerialForwardFrame(tx);
+  }
+
   if (!CAN_CanSend())
   {
     return;

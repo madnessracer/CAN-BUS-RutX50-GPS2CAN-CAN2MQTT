@@ -16,27 +16,27 @@ bool zoneDetectComputeOffsetForTimezone(const char *zoneName, long &outOffsetSec
 #include "UnixTimeClock.h"
 #include <zonedetect.h>
 
-inline const char *ZONEDETECT_DB_PATHS[] = {"/timezone16.bin"};
-inline const size_t ZONEDETECT_DB_PATH_COUNT = sizeof(ZONEDETECT_DB_PATHS) / sizeof(ZONEDETECT_DB_PATHS[0]);
-inline ZoneDetect *sZoneDetectLibrary = nullptr;
-inline size_t sZoneDetectDbLength = 0;
+static const char *ZONEDETECT_DB_PATHS[] = {"/timezone16.bin"};
+static const size_t ZONEDETECT_DB_PATH_COUNT = sizeof(ZONEDETECT_DB_PATHS) / sizeof(ZONEDETECT_DB_PATHS[0]);
+static ZoneDetect *sZoneDetectLibrary = nullptr;
+static size_t sZoneDetectDbLength = 0;
 
-inline portMUX_TYPE sZoneDetectMux = portMUX_INITIALIZER_UNLOCKED;
-inline bool sZoneDetectValid = false;
-inline char sZoneDetectTimezone[64] = "";
-inline char sZoneDetectCountry[64] = "";
-inline unsigned long sZoneDetectLastUpdateMs = 0;
-inline float sZoneDetectLastLatitude = 0.0f;
-inline float sZoneDetectLastLongitude = 0.0f;
-inline bool sZoneDetectHasLastPosition = false;
-inline bool sZoneDetectForceLookup = true;
-inline float sZoneDetectDistanceThresholdKm = 5.0f;
-inline bool sZoneDetectDbLoaded = false;
+static portMUX_TYPE sZoneDetectMux = portMUX_INITIALIZER_UNLOCKED;
+static bool sZoneDetectValid = false;
+static char sZoneDetectTimezone[64] = "";
+static char sZoneDetectCountry[64] = "";
+static unsigned long sZoneDetectLastUpdateMs = 0;
+static float sZoneDetectLastLatitude = 0.0f;
+static float sZoneDetectLastLongitude = 0.0f;
+static bool sZoneDetectHasLastPosition = false;
+static bool sZoneDetectForceLookup = true;
+static float sZoneDetectDistanceThresholdKm = 5.0f;
+static bool sZoneDetectDbLoaded = false;
 
-inline portMUX_TYPE sZoneDetectGpsMux = portMUX_INITIALIZER_UNLOCKED;
-inline bool sZoneDetectGpsValid = false;
-inline double sZoneDetectGpsLatitude = 0.0;
-inline double sZoneDetectGpsLongitude = 0.0;
+static portMUX_TYPE sZoneDetectGpsMux = portMUX_INITIALIZER_UNLOCKED;
+static bool sZoneDetectGpsValid = false;
+static double sZoneDetectGpsLatitude = 0.0;
+static double sZoneDetectGpsLongitude = 0.0;
 
 inline void zoneDetectStoreResult(const char *timezone, const char *country)
 {

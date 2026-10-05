@@ -1,11 +1,14 @@
 #ifndef __Wlan_Config_H__
 #define __Wlan_Config_H__
 
+#include <Arduino.h>
+#include <WiFi.h>
 #include <esp_task_wdt.h>
 
 // WebTerminal status functions werden extern bereitgestellt.
 void webTerminalAppendLine(const String &text);
 void webTerminalAppendFormat(const char *format, ...);
+inline void CAN_SendEx(bool frameExtended, uint8_t dlc, uint messageId, ...);
 
 const char *ssid;
 const char *password;
@@ -31,6 +34,7 @@ String NeueSSID;
 // Wer benötigt gerade WiFi?
 static bool wifi_needed_ota = false;
 static bool wifi_needed_webterm = false;
+static bool wifi_needed_bridge = false;
 
 // Stellt WiFi-Verbindung her. Gibt true zurück wenn verbunden.
 static bool WiFi_Connect()
@@ -62,7 +66,7 @@ static bool WiFi_Connect()
   if (WiFi.status() != WL_CONNECTED)
   {
     Serial.println("WiFi Verbindung fehlgeschlagen.");
-    CAN_Send(IP_Send_to_CAN, 0x04);
+    CAN_SendEx(true, 1, IP_Send_to_CAN, 0x04);
     WiFi.disconnect();
     WiFi.mode(WIFI_OFF);
     return false;
@@ -87,19 +91,19 @@ static bool WiFi_Connect()
   Serial.print("WiFi verbunden. IP: ");
   Serial.println(WiFi.localIP());
   IPAddress ip = WiFi.localIP();
-  CAN_Send(IP_Send_to_CAN, 0x02, ip[0], ip[1], ip[2], ip[3]);
+  CAN_SendEx(true, 5, IP_Send_to_CAN, 0x02, ip[0], ip[1], ip[2], ip[3]);
   return true;
 }
 
-// Trennt WiFi wenn weder OTA noch WebTerminal es benötigen.
+// Trennt WiFi wenn weder OTA, WebTerminal noch die Serial-Bridge es benötigen.
 static void WiFi_ReleaseIfUnneeded()
 {
-  if (!wifi_needed_ota && !wifi_needed_webterm)
+  if (!wifi_needed_ota && !wifi_needed_webterm && !wifi_needed_bridge)
   {
     WiFi.disconnect();
     WiFi.mode(WIFI_OFF);
     Serial.println("WiFi ausgeschaltet.");
-    CAN_Send(IP_Send_to_CAN, 0x03);
+    CAN_SendEx(true, 1, IP_Send_to_CAN, 0x03);
     ws2812SetBlinkRGB(0, 255, 0, 3000, 50);
   }
 }
@@ -118,7 +122,7 @@ void OTA_Stop()
 
 void OTA_Start()
 {
-  CAN_Send(IP_Send_to_CAN, 0x01);
+  CAN_SendEx(true, 1, IP_Send_to_CAN, 0x01);
 
   if (OTA_On == 1)
   {
@@ -146,7 +150,7 @@ void OTA_Start()
   ArduinoOTA.onStart([]()
                      {
     Serial.println("OTA Start: Watchdog auf 60s erhoehen");
-    CAN_Send(IP_Send_to_CAN, 0x05);
+    CAN_SendEx(true, 1, IP_Send_to_CAN, 0x05);
     otaUploadActive = true;
     esp_task_wdt_init(60, true);
     esp_task_wdt_add(NULL); 
@@ -165,7 +169,7 @@ void OTA_Start()
     Serial.println("OTA Ende: Watchdog zurueck auf 10s");
     otaUploadActive = false;
     incrementFirmwareVersion();
-    CAN_Send(IP_Send_to_CAN, 0x06);
+    CAN_SendEx(true, 1, IP_Send_to_CAN, 0x06);
     esp_task_wdt_init(10, true);
     esp_task_wdt_add(NULL);
     webTerminalAppendLine("OTA Upload abgeschlossen. Neustart...");
@@ -180,7 +184,7 @@ void OTA_Start()
     else if (error == OTA_CONNECT_ERROR) Serial.println("Connect Failed");
     else if (error == OTA_RECEIVE_ERROR) Serial.println("Receive Failed");
     else if (error == OTA_END_ERROR) Serial.println("End Failed");
-    CAN_Send(IP_Send_to_CAN, 0x07);
+    CAN_SendEx(true, 1, IP_Send_to_CAN, 0x07);
     esp_task_wdt_init(10, true);
     esp_task_wdt_add(NULL); 
     ws2812SetBlinkRGB(255, 0, 0, 500, 50);
@@ -194,7 +198,7 @@ void WifiScan()
 {
   Serial.println("Scan start");
 
-  CAN_Send(Can_Input_Wifi, 0x01);
+  CAN_SendEx(true, 1, Can_Input_Wifi, 0x01);
 
   byte n = WiFi.scanNetworks();
   Serial.println("Scan done");
@@ -202,7 +206,7 @@ void WifiScan()
   if (n == 0)
   {
     Serial.println("no networks found");
-    CAN_Send(Can_Output_Wifi_Scan, 0x02);
+    CAN_SendEx(true, 1, Can_Output_Wifi_Scan, 0x02);
   }
   else
   {
@@ -213,7 +217,7 @@ void WifiScan()
 
     Serial.print(n);
 
-    CAN_Send(Can_Output_Wifi_Scan, 0x03, n);
+    CAN_SendEx(true, 1, Can_Output_Wifi_Scan, 0x02);
 
     String SSID_gefunden;
 
@@ -238,15 +242,15 @@ void WifiScan()
       }
 
       delay(100);
-      CAN_Send(Can_Output_wifi_SSID_Scan_Daten1, i + 1, plain[0], plain[1], plain[2], plain[3], plain[4], plain[5], plain[6]);
+      CAN_SendEx(true, 8, Can_Output_wifi_SSID_Scan_Daten1, i + 1, plain[0], plain[1], plain[2], plain[3], plain[4], plain[5], plain[6]);
       delay(100);
-      CAN_Send(Can_Output_wifi_SSID_Scan_Daten2, i + 1, plain[7], plain[8], plain[9], plain[10], plain[11], plain[12], plain[13]);
+      CAN_SendEx(true, 8, Can_Output_wifi_SSID_Scan_Daten2, i + 1, plain[7], plain[8], plain[9], plain[10], plain[11], plain[12], plain[13]);
       delay(100);
-      CAN_Send(Can_Output_wifi_SSID_Scan_Daten3, i + 1, plain[14], plain[15], plain[16], plain[17], plain[18], plain[19], plain[20]);
+      CAN_SendEx(true, 8, Can_Output_wifi_SSID_Scan_Daten3, i + 1, plain[14], plain[15], plain[16], plain[17], plain[18], plain[19], plain[20]);
       delay(100);
-      CAN_Send(Can_Output_wifi_SSID_Scan_Daten4, i + 1, plain[21], plain[22], plain[23], plain[24], plain[25], plain[26], plain[27]);
+      CAN_SendEx(true, 8, Can_Output_wifi_SSID_Scan_Daten4, i + 1, plain[21], plain[22], plain[23], plain[24], plain[25], plain[26], plain[27]);
       delay(100);
-      CAN_Send(Can_Output_wifi_SSID_Scan_Daten5, i + 1, plain[28], plain[29], plain[30], plain[31]);
+      CAN_SendEx(true, 5, Can_Output_wifi_SSID_Scan_Daten5, i + 1, plain[28], plain[29], plain[30], plain[31]);
 
       Serial.println(SSID_gefunden);
 
@@ -285,13 +289,13 @@ void Aktuelle_SSID_Senden()
   message.getBytes(plain, message.length() + 1);
 
   delay(500);
-  CAN_Send(Can_Output_wifi_SSID_Daten1, plain[0], plain[1], plain[2], plain[3], plain[4], plain[5], plain[6], plain[7]);
+  CAN_SendEx(true, 8, Can_Output_wifi_SSID_Daten1, plain[0], plain[1], plain[2], plain[3], plain[4], plain[5], plain[6], plain[7]);
   delay(100);
-  CAN_Send(Can_Output_wifi_SSID_Daten2, plain[8], plain[9], plain[10], plain[11], plain[12], plain[13], plain[14], plain[15]);
+  CAN_SendEx(true, 8, Can_Output_wifi_SSID_Daten2, plain[8], plain[9], plain[10], plain[11], plain[12], plain[13], plain[14], plain[15]);
   delay(100);
-  CAN_Send(Can_Output_wifi_SSID_Daten3, plain[16], plain[17], plain[18], plain[19], plain[20], plain[21], plain[22], plain[23]);
+  CAN_SendEx(true, 8, Can_Output_wifi_SSID_Daten3, plain[16], plain[17], plain[18], plain[19], plain[20], plain[21], plain[22], plain[23]);
   delay(100);
-  CAN_Send(Can_Output_wifi_SSID_Daten4, plain[24], plain[25], plain[26], plain[27], plain[28], plain[29], plain[30], plain[31]);
+  CAN_SendEx(true, 8, Can_Output_wifi_SSID_Daten4, plain[24], plain[25], plain[26], plain[27], plain[28], plain[29], plain[30], plain[31]);
 }
 
 void Aktuelle_PASSWORT_Senden()
@@ -308,13 +312,13 @@ void Aktuelle_PASSWORT_Senden()
   message.getBytes(plain, message.length() + 1);
 
   delay(500);
-  CAN_Send(Can_Output_wifi_Passwort_Daten1, plain[0], plain[1], plain[2], plain[3], plain[4], plain[5], plain[6], plain[7]);
+  CAN_SendEx(true, 8, Can_Output_wifi_Passwort_Daten1, plain[0], plain[1], plain[2], plain[3], plain[4], plain[5], plain[6], plain[7]);
   delay(100);
-  CAN_Send(Can_Output_wifi_Passwort_Daten2, plain[8], plain[9], plain[10], plain[11], plain[12], plain[13], plain[14], plain[15]);
+  CAN_SendEx(true, 8, Can_Output_wifi_Passwort_Daten2, plain[8], plain[9], plain[10], plain[11], plain[12], plain[13], plain[14], plain[15]);
   delay(100);
-  CAN_Send(Can_Output_wifi_Passwort_Daten3, plain[16], plain[17], plain[18], plain[19], plain[20], plain[21], plain[22], plain[23]);
+  CAN_SendEx(true, 8, Can_Output_wifi_Passwort_Daten3, plain[16], plain[17], plain[18], plain[19], plain[20], plain[21], plain[22], plain[23]);
   delay(100);
-  CAN_Send(Can_Output_wifi_Passwort_Daten4, plain[24], plain[25], plain[26], plain[27], plain[28], plain[29], plain[30], plain[31]);
+  CAN_SendEx(true, 8, Can_Output_wifi_Passwort_Daten4, plain[24], plain[25], plain[26], plain[27], plain[28], plain[29], plain[30], plain[31]);
 }
 
 #endif

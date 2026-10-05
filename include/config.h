@@ -18,6 +18,8 @@
 #define GPS_TX_SER 6 // GPS UART TX
 #define GPS_BAUD_RATE 115200
 
+#define RC_SWITCH_RX_PIN 3 // 433MHz Empfaenger an IO3
+
 #define SDA 47
 #define SCL 48
 

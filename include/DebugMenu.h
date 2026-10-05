@@ -5,15 +5,17 @@
 #include <ArduinoOTA.h>
 #include <WiFi.h>
 #include <time.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/queue.h>
 #if defined(__has_include)
-#  if __has_include(<timezonedb_lookup.h>)
-#    include <timezonedb_lookup.h>
-#    define DEBUG_MENU_HAS_TIMEZONE_LOOKUP 1
-#  else
-#    define DEBUG_MENU_HAS_TIMEZONE_LOOKUP 0
-#  endif
+#if __has_include(<timezonedb_lookup.h>)
+#include <timezonedb_lookup.h>
+#define DEBUG_MENU_HAS_TIMEZONE_LOOKUP 1
 #else
-#  define DEBUG_MENU_HAS_TIMEZONE_LOOKUP 0
+#define DEBUG_MENU_HAS_TIMEZONE_LOOKUP 0
+#endif
+#else
+#define DEBUG_MENU_HAS_TIMEZONE_LOOKUP 0
 #endif
 #include "Wlan_Config.h"
 #include "Ws2812.h"
@@ -26,6 +28,7 @@
 #include "ZoneDetectTask.h"
 #include "UnixTimeClock.h"
 #include "CANPing.h"
+#include "433_Empang.h"
 
 static inline bool debugMenuParseGpsUtcSeconds(uint32_t &outUtcSeconds)
 {
@@ -154,11 +157,22 @@ enum DebugMenuState
   DEBUG_WIFI,
   DEBUG_CAN_LIVE,
   DEBUG_GPS_LIVE,
+  DEBUG_433_LIVE,
   DEBUG_TIME,
   DEBUG_PCA_LIVE
 };
 
 extern bool gpsLiveRawModeEnabled;
+
+void rcSwitchDeviceMapInit();
+bool rcSwitchDeviceMapSet(uint8_t device, uint32_t code);
+bool rcSwitchDeviceMapRemove(uint8_t device);
+uint8_t rcSwitchFindDeviceByCode(uint32_t code);
+void rcSwitchDeviceMapPrint();
+
+void handleDebugActivation();
+void processDebugMenu();
+void debugMenuLoop();
 
 enum WifiSubState
 {
@@ -216,9 +230,7 @@ static bool readSerialLine(Stream &stream, char *buffer, size_t bufferSize, size
     int c = stream.read();
     if (c < 0)
       break;
-    if (c == '\r')
-      continue;
-    if (c == '\n')
+    if (c == '\r' || c == '\n')
     {
       if (pos == 0)
         continue;
@@ -226,13 +238,20 @@ static bool readSerialLine(Stream &stream, char *buffer, size_t bufferSize, size
       pos = 0;
       return true;
     }
-    if (pos < bufferSize - 1)
+    if (c == '\t')
     {
-      buffer[pos++] = (char)c;
+      c = ' ';
     }
-    else
+    if (c >= 0x20 && c <= 0x7E)
     {
-      pos = 0;
+      if (pos < bufferSize - 1)
+      {
+        buffer[pos++] = (char)c;
+      }
+      else
+      {
+        pos = 0;
+      }
     }
   }
   return false;
@@ -294,9 +313,12 @@ void saveDebugAutoExitSetting(unsigned long minutes);
 void loadDebugAutoExitSetting();
 extern HardwareSerial *can_tx_ser;
 extern HardwareSerial *can_rx_ser;
+class SerialBridgeClass;
+extern SerialBridgeClass SerialBridge;
 bool parseCanMessageLine(const String &line, uint32_t &messageId, uint8_t &dlc, uint8_t data[8]);
 void processCanLiveMode();
 void processGpsLiveMode();
+void process433LiveMode();
 inline void processTimeLiveMode();
 extern CanLiveMode canLiveMode;
 extern bool gpsLiveMode;
@@ -372,7 +394,7 @@ inline void processTimeLiveMode()
     }
     Serial.printf("Sommerzeit: %s\n", dstActive ? "ja" : "nein");
     Serial.printf("UTC Offset: %s\n", offsetStr);
-    Serial.printf("Local Zeit: %02lu:%02lu:%02lu\n", localHours, localMinutes, localSeconds);  
+    Serial.printf("Local Zeit: %02lu:%02lu:%02lu\n", localHours, localMinutes, localSeconds);
     Serial.printf("Unix-Sekunden: %lu\n", unixSeconds);
     Serial.printf("Local Unix : %lu\n", localUnixSeconds);
     Serial.printf("GPS-Sync: %s\n", unixTimeClockHasGpsSynced() ? "ja" : "nein");
@@ -408,16 +430,16 @@ static const char *getTWAiStateName(twai_state_t state)
 {
   switch (state)
   {
-    case TWAI_STATE_STOPPED:
-      return "STOPPED";
-    case TWAI_STATE_RUNNING:
-      return "RUNNING";
-    case TWAI_STATE_RECOVERING:
-      return "RECOVERING";
-    case TWAI_STATE_BUS_OFF:
-      return "BUS_OFF";
-    default:
-      return "UNKNOWN";
+  case TWAI_STATE_STOPPED:
+    return "STOPPED";
+  case TWAI_STATE_RUNNING:
+    return "RUNNING";
+  case TWAI_STATE_RECOVERING:
+    return "RECOVERING";
+  case TWAI_STATE_BUS_OFF:
+    return "BUS_OFF";
+  default:
+    return "UNKNOWN";
   }
 }
 
@@ -577,7 +599,7 @@ static void printCanStatus()
     return;
   }
 
-  Serial.print("\n=== CAN Status ===\n");
+  Serial.print("=== CAN Status ===\n");
   Serial.printf("Zustand: %s\n", getTWAiStateName(status.state));
   Serial.printf("TX-Fehler: %u\n", status.tx_error_counter);
   Serial.printf("RX-Fehler: %u\n", status.rx_error_counter);
@@ -589,22 +611,21 @@ static void printCanStatus()
 void printDebugHelp()
 {
   clearTerminalScreen();
-  Serial.print("\n=== Debug-Menue Hilfe ===\n");
+  Serial.print("=== Debug-Menue Hilfe ===\n");
   Serial.printf("%-34s - %s\n", "help", "diese Hilfe anzeigen");
   Serial.printf("%-34s - %s\n", "exit", "Debug-Menue verlassen");
   Serial.printf("%-34s - %s\n", "reboot", "ESP neu starten");
   Serial.printf("%-34s - %s\n", "status", "Zeige Systemstatus");
   Serial.printf("%-34s - %s\n", "temp", "Zeige ESP-Temperatur");
   Serial.printf("%-34s - %s\n", "time", "Live- und System-Uptime anzeigen, beliebige Taste zum Beenden");
-  Serial.printf("%-34s - %s\n", "aht10 status", "AHT10-Status anzeigen");
-  Serial.printf("%-34s - %s\n", "aht10 on | aht10 off", "AHT10 periodisch ein-/ausschalten");
-  Serial.printf("%-34s - %s\n", "aht10 now", "AHT10 sofort messen und senden");
+  Serial.printf("%-34s - %s\n", "aht10 status/on/off/now", "AHT10-Status / Ein-/Ausschalten / sofort messen");
   Serial.printf("%-34s - %s\n", "wifi", "WLAN-Untermenue oeffnen");
   Serial.print("\n");
 
   Serial.printf("%-34s - %s\n", "ota | ota on | ota off", "OTA-Status / starten / beenden");
   Serial.printf("%-34s - %s\n", "ota autooff X", "OTA nach X Minuten auto ausschalten");
   Serial.printf("%-34s - %s\n", "ota autooff off", "OTA Auto-Off deaktivieren");
+  Serial.printf("%-34s - %s\n", "bridge on/off/status", "Debug-Bridge ueber IP starten/beenden/status anzeigen");
   Serial.print("\n");
 
   Serial.printf("%-34s - %s\n", "pca status | pca in | pca out", "PCA9555 I/O / Ein- und Ausgaenge");
@@ -612,15 +633,12 @@ void printDebugHelp()
   Serial.printf("%-34s - %s\n", "pca live | pca init", "Live / neu initialisieren");
   Serial.print("\n");
 
-  Serial.printf("%-34s - %s\n", "ws off", "WS2812 ausschalten");
-  Serial.printf("%-34s - %s\n", "ws blink R G B I D", "Blinkfarbe R,G,B, Intervall I ms, Dauer D ms");
-  Serial.printf("%-34s - %s\n", "ws on R G B", "Farbe dauerhaft einschalten");
-  Serial.print("\n");
-
+  Serial.printf("%-34s - %s\n", "433 live", "433MHz Empfaenger live verfolgen, beliebige Taste zum Beenden");
+  Serial.printf("%-34s - %s\n", "rcmap add N 0xCODE | del N | list | find", "433MHz Code-zu-Gerät-Mapping in NVS verwalten");
+  Serial.printf("%-34s - %s\n", "gps live [roh] | gps stop", "GPS-Serial live verfolgen / GPS Live Mode beenden");
   Serial.printf("%-34s - %s\n", "can live <serial|twai|all>", "CAN Live Modus mit Parameter auswählen");
-  Serial.printf("%-34s - %s\n", "gps live [roh]", "GPS-Serial live verfolgen, rohdaten optional anzeigen");
-  Serial.printf("%-34s - %s\n", "gps stop", "GPS Live Mode beenden");
   Serial.printf("%-34s - %s\n", "can status", "Aktuellen CAN/TWAI-Status anzeigen");
+  Serial.printf("%-34s - %s\n", "canfw add 0xID | del 0xID | list", "CAN-ID für serielle Weiterleitung speichern oder entfernen und auflisten");
   Serial.printf("%-34s - %s\n", "can test [count]", "Sende CAN-Testpakete und pruefe empfangene Pakete");
   Serial.printf("%-34s - %s\n", "sendcan 0xID;DLC;DATA", "CAN-Nachricht auf den CAN-Bus senden");
   Serial.printf("%-34s - %s\n", "webterm on|off|status", "Web Terminal Konsole im Browser ein-/ausschalten");
@@ -736,7 +754,7 @@ static void printZoneDetectStatus()
 
 void printOtaStatus()
 {
-  Serial.print("\n=== OTA Status ===\n");
+  Serial.print("=== OTA Status ===\n");
   Serial.printf("OTA aktiviert: %u\n", OTA_On);
   if (OTA_On && WiFi.status() == WL_CONNECTED)
   {
@@ -758,7 +776,7 @@ void printOtaStatus()
 void printTemperature()
 {
   float temp = temperatureRead();
-  Serial.print("\n=== ESP Temperatur ===\n");
+  Serial.print("=== ESP Temperatur ===\n");
   Serial.printf("Temperatur: %.1f Â°C\n", temp);
   Serial.print("=======================\n");
 }
@@ -817,7 +835,7 @@ void printCurrentTime()
 
 void printDebugStatus()
 {
-  Serial.print("\n=== Debug Status ===\n");
+  Serial.print("=== Debug Status ===\n");
   Serial.printf("OTA aktiviert: %u\n", OTA_On);
   if (OTA_AutoOffIntervalMs > 0)
   {
@@ -829,6 +847,7 @@ void printDebugStatus()
   }
   Serial.printf("WiFi-Status: %d\n", WiFi.status());
   Serial.printf("Boot-Zaehler: %lu\n", getBootCount());
+  Serial.printf("ESP CPU Temperatur: %.1f °C\n", temperatureRead());
 #ifdef FIRMWARE_VERSION
   Serial.printf("Firmware-Version: %s\n", FIRMWARE_VERSION);
 #else
@@ -897,7 +916,7 @@ void printStoredWifiCredentials()
   String ssid = SSID_Lesen();
   String password = PASSWORD_Lesen();
 
-  Serial.print("\n=== Gespeicherte WLAN-Daten ===\n");
+  Serial.print("=== Gespeicherte WLAN-Daten ===\n");
   Serial.print("SSID: ");
   Serial.print(ssid.length() ? ssid : "<leer>");
   Serial.print('\n');
@@ -958,7 +977,7 @@ void scanWifiNetworks()
 void showWifiPrompt()
 {
   clearTerminalScreen();
-  Serial.print("\n>> WLAN-Untermenue gestartet. Tippe 'help' fuer Befehle.\n");
+  Serial.print(">> WLAN-Untermenue gestartet. Tippe 'help' fuer Befehle.\n");
   printWifiHelp();
   wifiPromptShown = true;
   wifiSubState = WIFI_IDLE;
@@ -1103,6 +1122,17 @@ void loadDebugAutoExitSetting()
   }
 }
 
+void debugMenuLoop()
+{
+  if (debugMenuState != DEBUG_CAN_LIVE)
+  {
+    handleSerialCanInput();
+  }
+
+  handleDebugActivation();
+  processDebugMenu();
+}
+
 void processDebugMenu()
 {
   if (debugMenuState == DEBUG_OFF)
@@ -1158,6 +1188,7 @@ void processDebugMenu()
     }
     else if (strcmp(cmd, "status") == 0)
     {
+      clearTerminalScreen();
       printDebugStatus();
       debugAutoExitStart = millis();
     }
@@ -1179,7 +1210,8 @@ void processDebugMenu()
       debugMenuTrimWhitespace(params);
       if (params[0] == '\0' || strcmp(params, "status") == 0)
       {
-        printAHT10Status();
+        clearTerminalScreen();
+        printAHT10Status(Serial);
       }
       else if (strcmp(params, "on") == 0)
       {
@@ -1221,66 +1253,28 @@ void processDebugMenu()
       wifiPromptShown = false;
       debugAutoExitStart = millis();
     }
-    else if (strcmp(cmd, "ws off") == 0)
+    else if (strcmp(cmd, "bridge on") == 0)
     {
-      ws2812Off();
-      Serial.print("WS2812 ausgeschaltet.\n");
-    }
-    else if (strncmp(cmd, "ws blink", 8) == 0)
-    {
-      char params[64] = {0};
-      strncpy(params, cmd + 8, sizeof(params) - 1);
-      debugMenuTrimWhitespace(params);
-      char *parts[5] = {0};
-      int idx = splitTokens(params, parts, 5);
-      if (idx != 5)
+      if (SerialBridge.beginBridge())
       {
-        Serial.print("Verwendung: ws blink R G B Intervall_ms Dauer_ms\n");
+        Serial.println("[BRIDGE] gestartet.");
       }
       else
       {
-        int r = atoi(parts[0]);
-        int g = atoi(parts[1]);
-        int b = atoi(parts[2]);
-        unsigned long interval = strtoul(parts[3], NULL, 10);
-        unsigned long duration = strtoul(parts[4], NULL, 10);
-        if (r < 0 || r > 255 || g < 0 || g > 255 || b < 0 || b > 255 || interval == 0 || duration == 0)
-        {
-          Serial.print("Ungueltige Werte. RGB 0-255, Intervall/Dauer > 0.\n");
-        }
-        else
-        {
-          ws2812SetBlinkRGB(r, g, b, interval, duration);
-          Serial.printf("WS2812 blink: %d,%d,%d, %lums Pause, %lums Dauer\n", r, g, b, interval, duration);
-        }
+        Serial.println("[BRIDGE] Start fehlgeschlagen.");
       }
+      debugAutoExitStart = millis();
     }
-    else if (strncmp(cmd, "ws on", 5) == 0)
+    else if (strcmp(cmd, "bridge off") == 0)
     {
-      char params[64] = {0};
-      strncpy(params, cmd + 5, sizeof(params) - 1);
-      debugMenuTrimWhitespace(params);
-      char *parts[3] = {0};
-      int idx = splitTokens(params, parts, 3);
-      if (idx != 3)
-      {
-        Serial.print("Verwendung: ws on R G B\n");
-      }
-      else
-      {
-        int r = atoi(parts[0]);
-        int g = atoi(parts[1]);
-        int b = atoi(parts[2]);
-        if (r < 0 || r > 255 || g < 0 || g > 255 || b < 0 || b > 255)
-        {
-          Serial.print("Ungueltige Werte. RGB 0-255.\n");
-        }
-        else
-        {
-          ws2812SetOnRGB(r, g, b);
-          Serial.printf("WS2812 on: %d,%d,%d\n", r, g, b);
-        }
-      }
+      SerialBridge.stopBridge();
+      Serial.println("[BRIDGE] beendet.");
+      debugAutoExitStart = millis();
+    }
+    else if (strcmp(cmd, "bridge status") == 0)
+    {
+      Serial.printf("[BRIDGE] Status: %s\n", SerialBridge.bridgeActive() ? "aktiv" : "inaktiv");
+      debugAutoExitStart = millis();
     }
     else if (strcmp(cmd, "can status") == 0)
     {
@@ -1325,6 +1319,12 @@ void processDebugMenu()
       gpsLiveMode = true;
       gpsLiveRawModeEnabled = false;
       Serial.print("Starte GPS Live Mode. Beliebige Taste zum Beenden.\n");
+    }
+    else if (strcmp(cmd, "433 live") == 0)
+    {
+      debugMenuState = DEBUG_433_LIVE;
+      debugPromptShown = false;
+      Serial.print("Starte 433MHz Live Mode. Beliebige Taste zum Beenden.\n");
     }
     else if (strcmp(cmd, "gps stop") == 0)
     {
@@ -1492,16 +1492,23 @@ void processDebugMenu()
     }
     else if (strcmp(cmd, "error log") == 0 || strcmp(cmd, "error l") == 0)
     {
+      Serial.println("\n--- Fehler-Log Ausgabe ---");
       errorLogPrint();
+      Serial.println("--- Ende Fehler-Log ---\n");
+      Serial.flush();
     }
     else if (strcmp(cmd, "error info") == 0 || strcmp(cmd, "error i") == 0)
     {
+      Serial.println("\n--- Fehler-Log Info ---");
       errorLogPrintInfo();
+      Serial.println("--- Ende Fehler-Log Info ---\n");
+      Serial.flush();
     }
     else if (strcmp(cmd, "error clear") == 0 || strcmp(cmd, "error c") == 0)
     {
       errorLogClear();
       Serial.print("Fehler-Log geloescht.\n");
+      Serial.flush();
     }
     else if (strncmp(cmd, "sendcan ", 8) == 0)
     {
@@ -1521,6 +1528,119 @@ void processDebugMenu()
                    data[0], data[1], data[2], data[3],
                    data[4], data[5], data[6], data[7]);
         Serial.printf("CAN gesendet: %s\n", payload);
+      }
+    }
+    else if (strncmp(cmd, "canfw add ", 10) == 0)
+    {
+      char payload[32] = {0};
+      strncpy(payload, cmd + 10, sizeof(payload) - 1);
+      debugMenuTrimWhitespace(payload);
+      uint32_t messageId;
+      if (!parseHexId(payload, messageId))
+      {
+        Serial.print("Ungueltige ID. Verwende 0xID oder Dezimalzahl.\n");
+      }
+      else
+      {
+        canForwardIdsAdd(messageId);
+      }
+    }
+    else if (strncmp(cmd, "canfw del ", 10) == 0)
+    {
+      char payload[32] = {0};
+      strncpy(payload, cmd + 10, sizeof(payload) - 1);
+      debugMenuTrimWhitespace(payload);
+      uint32_t messageId;
+      if (!parseHexId(payload, messageId))
+      {
+        Serial.print("Ungueltige ID. Verwende 0xID oder Dezimalzahl.\n");
+      }
+      else
+      {
+        canForwardIdsRemove(messageId);
+      }
+    }
+    else if (strcmp(cmd, "canfw list") == 0)
+    {
+      canForwardIdsPrint();
+    }
+    else if (strncmp(cmd, "rcmap add ", 10) == 0)
+    {
+      char payload[32] = {0};
+      strncpy(payload, cmd + 10, sizeof(payload) - 1);
+      debugMenuTrimWhitespace(payload);
+      char *space = strchr(payload, ' ');
+      if (space == nullptr)
+      {
+        Serial.print("Ungueltiges Format. Verwende: rcmap add <device> <code>\n");
+      }
+      else
+      {
+        *space = '\0';
+        uint8_t device = (uint8_t)atoi(payload);
+        uint32_t code;
+        if (device == 0 || !parseHexId(space + 1, code))
+        {
+          Serial.print("Ungueltiger Befehl. Verwende: rcmap add <1-255> 0xCODE\n");
+        }
+        else if (rcSwitchDeviceMapSet(device, code))
+        {
+          Serial.printf("RCSWITCH: device %u -> code %lu gespeichert\n", device, (unsigned long)code);
+        }
+      }
+    }
+    else if (strncmp(cmd, "rcmap del ", 10) == 0)
+    {
+      char payload[32] = {0};
+      strncpy(payload, cmd + 10, sizeof(payload) - 1);
+      debugMenuTrimWhitespace(payload);
+      uint8_t device = (uint8_t)atoi(payload);
+      if (device == 0)
+      {
+        Serial.print("Ungueltiges Format. Verwende: rcmap del <1-255>\n");
+      }
+      else if (rcSwitchDeviceMapRemove(device))
+      {
+        Serial.printf("RCSWITCH: device %u entfernt\n", device);
+      }
+    }
+    else if (strcmp(cmd, "rcmap list") == 0)
+    {
+      rcSwitchDeviceMapPrint();
+    }
+    else if (strcmp(cmd, "rcmap find") == 0)
+    {
+      if (!rcSwitchLastValueValid)
+      {
+        Serial.println("RCSWITCH: kein empfangener Code vorhanden");
+      }
+      else
+      {
+        uint32_t code;
+        unsigned long receivedAtMs;
+        bool valid;
+        portENTER_CRITICAL(&rcSwitchLock);
+        code = rcSwitchLastValue;
+        receivedAtMs = rcSwitchLastReceivedAtMs;
+        valid = rcSwitchLastValueValid;
+        portEXIT_CRITICAL(&rcSwitchLock);
+
+        if (!valid)
+        {
+          Serial.println("RCSWITCH: kein empfangener Code vorhanden");
+        }
+        else
+        {
+          uint8_t device = rcSwitchFindDeviceByCode(code);
+          if (device == 0)
+          {
+            Serial.printf("RCSWITCH: Code %lu keinem Geraet zugeordnet\n", (unsigned long)code);
+          }
+          else
+          {
+            Serial.printf("RCSWITCH: Code %lu gehoert zu Geraet %u\n", (unsigned long)code, device);
+          }
+        }
       }
     }
     else if (strncmp(cmd, "webterm", 7) == 0)
@@ -1549,8 +1669,9 @@ void processDebugMenu()
 
     else if (strncmp(cmd, "canping", 7) == 0)
     {
-      const char* params = cmd + 7;
-      while (*params == ' ') params++;
+      const char *params = cmd + 7;
+      while (*params == ' ')
+        params++;
       if (strcmp(params, "on") == 0)
       {
         CANPing::setEnabled(true);
@@ -1562,9 +1683,9 @@ void processDebugMenu()
       else if (strcmp(params, "status") == 0)
       {
         Serial.printf("CANPing: %s, Modus: %s, Pings beantwortet: %lu\n",
-          CANPing::isEnabled() ? "aktiv" : "deaktiviert",
-          CANPing::isFastMode() ? "FAST" : "normal",
-          (unsigned long)CANPing::getPingCount());
+                      CANPing::isEnabled() ? "aktiv" : "deaktiviert",
+                      CANPing::isFastMode() ? "FAST" : "normal",
+                      (unsigned long)CANPing::getPingCount());
         Serial.printf("  Request-ID:  0x%08X\n", (unsigned)(CANPing::CANPING_CMD_BASE + CANPing::node_id));
         Serial.printf("  Response-ID: 0x%08X\n", (unsigned)(CANPing::CANPING_CMD_BASE + CANPing::CANPING_RESP_OFFSET + CANPing::node_id));
       }
@@ -1667,6 +1788,7 @@ void processDebugMenu()
     }
     else if (strcmp(cmd, "zone") == 0)
     {
+      clearTerminalScreen();
       printZoneDetectStatus();
     }
     else
@@ -1685,6 +1807,10 @@ void processDebugMenu()
   else if (debugMenuState == DEBUG_GPS_LIVE)
   {
     processGpsLiveMode();
+  }
+  else if (debugMenuState == DEBUG_433_LIVE)
+  {
+    process433LiveMode();
   }
   else if (debugMenuState == DEBUG_TIME)
   {
@@ -1738,16 +1864,74 @@ void processCanLiveMode()
   }
 
   static size_t canLiveExitPos = 0;
-  char key[32] = {0};
-  if (readSerialLine(Serial, key, sizeof(key), canLiveExitPos))
+  if (Serial.available() > 0)
   {
-    debugMenuTrimWhitespace(key);
+    while (Serial.available() > 0)
+    {
+      Serial.read();
+    }
     debugMenuState = DEBUG_MAIN;
     debugPromptShown = false;
     canLiveMode = CAN_LIVE_OFF;
     Serial.print("CAN Live Mode beendet.\n");
     printDebugHelp();
     return;
+  }
+  delay(1);
+}
+
+void process433LiveMode()
+{
+  if (!debugPromptShown)
+  {
+    clearTerminalScreen();
+    Serial.print("\n=== 433MHz Live Mode ===\n");
+    Serial.print("Live-Empfang der 433MHz Signale.\n");
+    Serial.print("Beliebige Taste auf USB-Serial zum Beenden.\n");
+    Serial.print("===========================\n");
+    debugPromptShown = true;
+  }
+
+  static size_t liveExitPos = 0;
+  if (Serial.available() > 0)
+  {
+    while (Serial.available() > 0)
+    {
+      Serial.read();
+    }
+    debugMenuState = DEBUG_MAIN;
+    debugPromptShown = false;
+    Serial.print("433MHz Live Mode beendet.\n");
+    printDebugHelp();
+    return;
+  }
+
+  delay(1);
+
+  static unsigned long lastPrintedAtMs = 0;
+  unsigned long code = 0;
+  unsigned long receivedAtMs = 0;
+  uint8_t device = 0;
+  bool valid = false;
+
+  portENTER_CRITICAL(&rcSwitchLock);
+  code = rcSwitchLastValue;
+  device = rcSwitchLastDevice;
+  receivedAtMs = rcSwitchLastReceivedAtMs;
+  valid = rcSwitchLastValueValid;
+  portEXIT_CRITICAL(&rcSwitchLock);
+
+  if (valid && receivedAtMs > lastPrintedAtMs)
+  {
+    if (device == 0)
+    {
+      Serial.printf("[433MHz] Code=%lu, unknown device\n", code);
+    }
+    else
+    {
+      Serial.printf("[433MHz] Code=%lu, device %u\n", code, device);
+    }
+    lastPrintedAtMs = receivedAtMs;
   }
 }
 
@@ -1818,16 +2002,38 @@ void handleDebugActivation()
   if (debugMenuState == DEBUG_OFF)
   {
     static size_t dbgLinePos = 0;
+    static bool lastBridgeClientConnected = false;
+    bool bridgeClientConnected = SerialBridge.clientConnected();
+    if (bridgeClientConnected != lastBridgeClientConnected)
+    {
+      dbgLinePos = 0;
+      if (bridgeClientConnected)
+      {
+        // Verwerfe eingehende Bytes beim neuen Bridge-Client, damit alte Eingaben nicht stören.
+        while (SerialBridge.available() > 0)
+        {
+          SerialBridge.read();
+        }
+      }
+      lastBridgeClientConnected = bridgeClientConnected;
+    }
+
     char input[64] = {0};
-    if (readSerialLine(Serial, input, sizeof(input), dbgLinePos))
+    if (readSerialLine(SerialBridge, input, sizeof(input), dbgLinePos))
     {
       debugMenuTrimWhitespace(input);
+      if (input[0] == '\0')
+      {
+        return;
+      }
       for (size_t i = 0; input[i] != '\0'; ++i)
       {
         input[i] = tolower((unsigned char)input[i]);
       }
+      Serial.printf("[DBG] empfangen: '%s'\n", input);
       if (strcmp(input, "debug") == 0)
       {
+        Serial.print("Eingabe uebers Bridge-Kanal erkannt. Debug-Modus wird gestartet.\n");
         startDebugMode();
       }
     }

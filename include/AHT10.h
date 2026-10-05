@@ -198,29 +198,34 @@ static void updateAHT10()
   }
 }
 
-static void printAHT10Status()
+static void printAHT10Status(Print &out)
 {
-  Serial.print("\n=== AHT10 Status ===\n");
-  Serial.printf("AHT10 aktiv: %s\n", aht10Enabled ? "ja" : "nein");
-  Serial.printf("AHT10 Zustand: %s\n", aht10State == AHT10_MEASURING ? "Messung laeuft" : "bereit");
+  out.print("\n=== AHT10 Status ===\n");
+  out.printf("AHT10 aktiv: %s\n", aht10Enabled ? "ja" : "nein");
+  out.printf("AHT10 Zustand: %s\n", aht10State == AHT10_MEASURING ? "Messung laeuft" : "bereit");
   if (!isnan(aht10LastTemperature))
   {
-    Serial.printf("Letzte Temperatur: %.1f °C\n", aht10LastTemperature);
+    out.printf("Letzte Temperatur: %.1f °C\n", aht10LastTemperature);
   }
   else
   {
-    Serial.print("Letzte Temperatur: n/a\n");
+    out.print("Letzte Temperatur: n/a\n");
   }
 
   if (!isnan(aht10LastHumidity))
   {
-    Serial.printf("Letzte Luftfeuchte: %.1f %%\n", aht10LastHumidity);
+    out.printf("Letzte Luftfeuchte: %.1f %%\n", aht10LastHumidity);
   }
   else
   {
-    Serial.print("Letzte Luftfeuchte: n/a\n");
+    out.print("Letzte Luftfeuchte: n/a\n");
   }
-  Serial.print("===================\n");
+  out.print("===================\n");
+}
+
+static void printAHT10Status()
+{
+  printAHT10Status(Serial);
 }
 
 #endif // AHT10_H

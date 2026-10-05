@@ -20,7 +20,11 @@
 
 bool parseCanMessageLine(const char *line, uint32_t &messageId, uint8_t &dlc, uint8_t data[8]);
 bool parseCanMessageLine(const String &line, uint32_t &messageId, uint8_t &dlc, uint8_t data[8]);
-void CAN_SendEx(bool frameExtended, uint8_t dlc, uint messageId, ...);
+bool parseHexId(const char *text, uint32_t &messageId);
+bool canForwardIdsAdd(uint32_t messageId);
+bool canForwardIdsRemove(uint32_t messageId);
+void canForwardIdsPrint();
+inline void CAN_SendEx(bool frameExtended, uint8_t dlc, uint messageId, ...);
 
 enum CanLiveMode { CAN_LIVE_OFF = 0, CAN_LIVE_SERIAL = 1, CAN_LIVE_TWAI = 2, CAN_LIVE_ALL = 3 };
 extern CanLiveMode canLiveMode;
@@ -230,6 +234,8 @@ static void printWebTerminalHelp()
   webTerminalAppendLine("can status");
   webTerminalAppendLine("can live <serial|twai|all>");
   webTerminalAppendLine("can stop");
+  webTerminalAppendLine("canfw add 0xID | canfw del 0xID");
+  webTerminalAppendLine("canfw list");
   webTerminalAppendLine("gps live [roh]");
   webTerminalAppendLine("gps stop");
   webTerminalAppendLine("can test <count>");
@@ -651,6 +657,7 @@ static void handleWebTerminalCommand(const char *command)
     snprintf(ipBuf, sizeof(ipBuf), "%u.%u.%u.%u", ip[0], ip[1], ip[2], ip[3]);
     webTerminalAppendFormat("WiFi: %s", ipBuf);
     webTerminalAppendFormat("Web-Terminal: %s", g_webTerminalEnabled ? "aktiv" : "deaktiviert");
+    webTerminalAppendFormat("CPU Temperatur: %.1f °C", temperatureRead());
     webTerminalAppendFormat("OTA aktiviert: %u", OTA_On);
     if (OTA_On)
     {
@@ -1046,6 +1053,52 @@ static void handleWebTerminalCommand(const char *command)
   if (strncmp(cmdLower, "autoexit ", 9) == 0)
   {
     webTerminalAppendLine("Auto-Exit wird im Web-Terminal nicht unterstuetzt.");
+    return;
+  }
+
+  if (strncmp(cmdLower, "canfw add ", 10) == 0)
+  {
+    const char *payload = cmdBuf + 10;
+    char payloadBuf[32];
+    strncpy(payloadBuf, payload, sizeof(payloadBuf) - 1);
+    payloadBuf[sizeof(payloadBuf) - 1] = '\0';
+    webTerminalTrimWhitespace(payloadBuf);
+    uint32_t messageId;
+    if (!parseHexId(payloadBuf, messageId))
+    {
+      webTerminalAppendLine("Ungueltige ID. Verwende 0xID oder Dezimalzahl.");
+      return;
+    }
+    if (canForwardIdsAdd(messageId))
+    {
+      webTerminalAppendFormat("CANFW: ID 0x%lX gespeichert", (unsigned long)messageId);
+    }
+    return;
+  }
+
+  if (strncmp(cmdLower, "canfw del ", 10) == 0)
+  {
+    const char *payload = cmdBuf + 10;
+    char payloadBuf[32];
+    strncpy(payloadBuf, payload, sizeof(payloadBuf) - 1);
+    payloadBuf[sizeof(payloadBuf) - 1] = '\0';
+    webTerminalTrimWhitespace(payloadBuf);
+    uint32_t messageId;
+    if (!parseHexId(payloadBuf, messageId))
+    {
+      webTerminalAppendLine("Ungueltige ID. Verwende 0xID oder Dezimalzahl.");
+      return;
+    }
+    if (canForwardIdsRemove(messageId))
+    {
+      webTerminalAppendFormat("CANFW: ID 0x%lX entfernt", (unsigned long)messageId);
+    }
+    return;
+  }
+
+  if (strcmp(cmdLower, "canfw list") == 0)
+  {
+    canForwardIdsPrint();
     return;
   }
 

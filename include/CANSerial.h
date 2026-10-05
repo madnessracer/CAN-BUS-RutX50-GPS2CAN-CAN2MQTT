@@ -8,12 +8,16 @@
 #include "Can-Bus IDs.h"
 #include "WebTerminal.h"
 #include "PCA9555.h"
+#include "SerialBridge.h"
 #include <cstring>
 #include <cstdlib>
 
 extern HardwareSerial *can_tx_ser;
 extern HardwareSerial *can_rx_ser;
 extern CanLiveMode canLiveMode;
+
+class SerialBridgeClass;
+extern SerialBridgeClass SerialBridge;
 
 static inline bool canLiveSerialEnabled()
 {
@@ -24,6 +28,134 @@ static inline bool canLiveTwaiEnabled()
 {
   return canLiveMode == CAN_LIVE_TWAI || canLiveMode == CAN_LIVE_ALL;
 }
+
+static constexpr size_t CAN_SERIAL_TX_QUEUE_SIZE = 32;
+static constexpr size_t CAN_SERIAL_TX_LINE_SIZE = 64;
+static char canSerialTxQueue[CAN_SERIAL_TX_QUEUE_SIZE][CAN_SERIAL_TX_LINE_SIZE];
+static uint8_t canSerialTxQueueHead = 0;
+static uint8_t canSerialTxQueueTail = 0;
+static uint8_t canSerialTxQueueCount = 0;
+static unsigned long canSerialTxLastMillis = 0;
+
+inline bool canSerialTxQueueIsFull()
+{
+  return canSerialTxQueueCount >= CAN_SERIAL_TX_QUEUE_SIZE;
+}
+
+inline bool canSerialTxQueueIsEmpty()
+{
+  return canSerialTxQueueCount == 0;
+}
+
+inline bool canSerialTxEnqueue(const twai_message_t &frame)
+{
+  if (canSerialTxQueueIsFull())
+  {
+    return false;
+  }
+
+  char lineBuf[CAN_SERIAL_TX_LINE_SIZE];
+  size_t pos = snprintf(lineBuf, sizeof(lineBuf), "0x%lX;%u;", frame.identifier, frame.data_length_code);
+  for (uint8_t i = 0; i < frame.data_length_code && pos + 2 < sizeof(lineBuf) - 1; ++i)
+  {
+    int written = snprintf(lineBuf + pos, sizeof(lineBuf) - pos, "%02X", frame.data[i]);
+    if (written < 0)
+      break;
+    pos += (size_t)written;
+  }
+  if (pos + 1 < sizeof(lineBuf))
+  {
+    lineBuf[pos++] = '\n';
+    lineBuf[pos] = '\0';
+  }
+
+  memcpy(canSerialTxQueue[canSerialTxQueueTail], lineBuf, pos + 1);
+  canSerialTxQueueTail = (canSerialTxQueueTail + 1) % CAN_SERIAL_TX_QUEUE_SIZE;
+  canSerialTxQueueCount++;
+  return true;
+}
+
+inline void processCanSerialTxQueue()
+{
+  if (canSerialTxQueueIsEmpty())
+  {
+    return;
+  }
+
+  unsigned long now = millis();
+  if (now - canSerialTxLastMillis < 5)
+  {
+    return;
+  }
+
+  char *line = canSerialTxQueue[canSerialTxQueueHead];
+  size_t len = strlen(line);
+  if (len == 0)
+  {
+    canSerialTxQueueHead = (canSerialTxQueueHead + 1) % CAN_SERIAL_TX_QUEUE_SIZE;
+    canSerialTxQueueCount--;
+    canSerialTxLastMillis = now;
+    return;
+  }
+
+  if (canLiveSerialEnabled())
+  {
+    char lastChar = line[len - 1];
+    if (lastChar == '\n')
+    {
+      line[len - 1] = '\0';
+    }
+    Serial.print("[CAN SERIAL TX] ");
+    Serial.println(line);
+    webTerminalAppendFormat("[CAN SERIAL TX] %s", line);
+    if (lastChar == '\n')
+    {
+      line[len - 1] = lastChar;
+    }
+  }
+
+  can_tx_ser->write((const uint8_t *)line, len);
+
+  canSerialTxQueueHead = (canSerialTxQueueHead + 1) % CAN_SERIAL_TX_QUEUE_SIZE;
+  canSerialTxQueueCount--;
+  canSerialTxLastMillis = now;
+}
+
+inline bool parseHexId(const char *text, uint32_t &messageId)
+{
+  if (text == nullptr || text[0] == '\0')
+  {
+    return false;
+  }
+
+  char *endptr = nullptr;
+  if (text[0] == '0' && (text[1] == 'x' || text[1] == 'X'))
+  {
+    messageId = (uint32_t)strtoul(text + 2, &endptr, 16);
+  }
+  else
+  {
+    messageId = (uint32_t)strtoul(text, &endptr, 10);
+  }
+
+  if (endptr == nullptr || *endptr != '\0')
+  {
+    return false;
+  }
+
+  if (messageId > 0x1FFFFFFF)
+  {
+    return false;
+  }
+
+  return true;
+}
+
+void canForwardIdsInit();
+bool canForwardIdsAdd(uint32_t messageId);
+bool canForwardIdsRemove(uint32_t messageId);
+void canForwardIdsPrint();
+bool canForwardIdAllowed(uint32_t messageId);
 
 void OTA_Start();
 void OTA_Stop();
@@ -152,36 +284,15 @@ inline void logCanTwaiFrame(const twai_message_t &frame)
 
 inline void sendCanMessageToCanTxSer(const twai_message_t &frame)
 {
-  char lineBuf[48];
-  size_t pos = snprintf(lineBuf, sizeof(lineBuf), "0x%lX;%u;", frame.identifier, frame.data_length_code);
-  for (uint8_t i = 0; i < frame.data_length_code && pos + 2 < sizeof(lineBuf) - 1; ++i)
+  if (!canSerialTxEnqueue(frame))
   {
-    int written = snprintf(lineBuf + pos, sizeof(lineBuf) - pos, "%02X", frame.data[i]);
-    if (written < 0)
-      break;
-    pos += (size_t)written;
+    return;
   }
-  lineBuf[pos] = '\0';
+}
 
-  if (canLiveSerialEnabled())
-  {
-    Serial.print("[CAN SERIAL TX] ");
-    Serial.println(lineBuf);
-    webTerminalAppendFormat("[CAN SERIAL TX] %s", lineBuf);
-  }
-
-  can_tx_ser->print("0x");
-  can_tx_ser->print((unsigned long)frame.identifier, HEX);
-  can_tx_ser->print(';');
-  can_tx_ser->print(frame.data_length_code);
-  can_tx_ser->print(';');
-  for (uint8_t i = 0; i < frame.data_length_code; ++i)
-  {
-    if (frame.data[i] < 0x10)
-      can_tx_ser->print('0');
-    can_tx_ser->print(frame.data[i], HEX);
-  }
-  can_tx_ser->print('\n');
+inline void canSerialForwardFrame(const twai_message_t &frame)
+{
+  sendCanMessageToCanTxSer(frame);
 }
 
 inline void handleSerialCanInput()
@@ -276,6 +387,19 @@ inline void handleSerialCanInput()
     else if (dlc >= 2 && data[0] == 0x01 && data[1] == 0x03)
     {
       webTerminalSetEnabled(true);
+      shouldForward = false;
+    }
+    else if (dlc >= 2 && data[0] == 0x01 && data[1] == 0x05)
+    {
+      SerialBridge.stopBridge();
+      shouldForward = false;
+    }
+    else if (dlc >= 2 && data[0] == 0x01 && data[1] == 0x06)
+    {
+      if (!SerialBridge.beginBridge())
+      {
+        errorLogAddOnce("CAN_BRIDGE_FAIL", "SerialBridge start failed");
+      }
       shouldForward = false;
     }
   }

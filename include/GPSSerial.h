@@ -2,6 +2,7 @@
 #define GPS_SERIAL_H
 
 #include <Arduino.h>
+#include "Wlan_Config.h"
 
 static const char GPSSERIAL_PREFIX_GPGGA[] = "$GPGGA";
 static const char GPSSERIAL_PREFIX_GPRMC[] = "$GPRMC";
@@ -205,6 +206,43 @@ static inline void gpsSerialPrintLiveData()
   Serial.printf("Date           : %s\n", gpsSerialValueOrDash(dateFormatted));
   Serial.printf("Mag Var        : %s %s\n", gpsSerialValueOrDash(gpsSerialData.magneticVariation), gpsSerialValueOrDash(gpsSerialData.magneticVariationDir));
   Serial.printf("Mode Indicator : %s\n", gpsSerialValueOrDash(gpsSerialData.modeIndicator));
+}
+
+static inline void gpsSerialPrintLiveDataToWebTerminal()
+{
+  char utcFormatted[16] = "";
+  gpsSerialFormatUtcTime(gpsSerialData.utcTime, utcFormatted, sizeof(utcFormatted));
+  webTerminalAppendFormat("UTC Time       : %s", gpsSerialValueOrDash(utcFormatted));
+  webTerminalAppendFormat("Status         : %s", gpsSerialValueOrDash(gpsSerialData.status));
+
+  char latFormatted[32] = "";
+  gpsSerialFormatLatLong(gpsSerialData.latitude, gpsSerialData.latitudeDir, latFormatted, sizeof(latFormatted));
+  webTerminalAppendFormat("Latitude       : %s", gpsSerialValueOrDash(latFormatted));
+
+  char lonFormatted[32] = "";
+  gpsSerialFormatLatLong(gpsSerialData.longitude, gpsSerialData.longitudeDir, lonFormatted, sizeof(lonFormatted));
+  webTerminalAppendFormat("Longitude      : %s", gpsSerialValueOrDash(lonFormatted));
+
+  webTerminalAppendFormat("Fix Quality    : %s", gpsSerialValueOrDash(gpsSerialData.fixQuality));
+  webTerminalAppendFormat("Satellites     : %s", gpsSerialValueOrDash(gpsSerialData.satellites));
+  webTerminalAppendFormat("HDOP           : %s", gpsSerialValueOrDash(gpsSerialData.hdop));
+  webTerminalAppendFormat("Altitude       : %s", gpsSerialValueOrDash(gpsSerialData.altitude));
+
+  char speedKmH[16] = "";
+  if (gpsSerialData.speedKnots[0] != '\0')
+  {
+    float knots = atof(gpsSerialData.speedKnots);
+    float kmh = knots * 1.852f;
+    snprintf(speedKmH, sizeof(speedKmH), "%.2f", kmh);
+  }
+  webTerminalAppendFormat("Speed (km/h)   : %s", gpsSerialValueOrDash(speedKmH));
+  webTerminalAppendFormat("Track Angle    : %s", gpsSerialValueOrDash(gpsSerialData.trackAngle));
+
+  char dateFormatted[16] = "";
+  gpsSerialFormatDate(gpsSerialData.date, dateFormatted, sizeof(dateFormatted));
+  webTerminalAppendFormat("Date           : %s", gpsSerialValueOrDash(dateFormatted));
+  webTerminalAppendFormat("Mag Var        : %s %s", gpsSerialValueOrDash(gpsSerialData.magneticVariation), gpsSerialValueOrDash(gpsSerialData.magneticVariationDir));
+  webTerminalAppendFormat("Mode Indicator : %s", gpsSerialValueOrDash(gpsSerialData.modeIndicator));
 }
 
 static inline void gpsSerialParseLine(const char *line)

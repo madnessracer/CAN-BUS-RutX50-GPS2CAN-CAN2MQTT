@@ -120,8 +120,7 @@ static void errorLogPrint()
       Serial.printf("%2u: %s\n", (unsigned int)(i + 1), lines[i]);
     }
   }
-  Serial.println("==================\n");
-}
+  Serial.println("==================\n");  Serial.flush();}
 
 static void errorLogPrintInfo()
 {
@@ -161,8 +160,7 @@ static void errorLogPrintInfo()
   {
     Serial.println(" - keine Aktivitaeten");
   }
-  Serial.println("======================\n");
-}
+  Serial.println("======================\n");  Serial.flush();}
 
 static void errorLogClear()
 {

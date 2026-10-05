@@ -6,7 +6,7 @@ constexpr char WIFI_Name[] = "RutX50-CAN-GPS-MQTT"; // Geräte-Hostname für WiF
 constexpr uint8_t OtaDevieID = 0x0D;   // 13 in Dezimal, Geräte-ID für OTA-Updates über CAN
 
 // Geräde IDs für CAN-Kommunikation
-constexpr uint16_t MessageBasisID = 0x258; // 600 in Dezimal, Basis-ID für CAN-Nachrichten nur bist betriebsstundenzähler online ist
+constexpr uint16_t MessageBasisID = 0x258; // 600 in Dezimal, Uhrzeit und Datum Basis-ID für CAN-Nachricht nur bist betriebsstundenzähler online ist
 
 //constexpr uint16_t MessageBasisID = 0x51E; // 1310 in Dezimal, Basis-ID für CAN-Nachrichten
 constexpr uint16_t FetSteuerID = 0x523; // 1315 in Dezimal, FET-Steuerungs-ID für CAN-Kommunikation
